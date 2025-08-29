@@ -1,0 +1,155 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  phoneE164 String   @unique @map("phone_e164")
+  name      String?
+  avatarUrl String?  @map("avatar_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  categories     Category[]
+  paymentIntents PaymentIntent[]
+
+  @@map("users")
+}
+
+model Category {
+  id                String    @id @default(cuid())
+  userId            String    @map("user_id")
+  name              String
+  color             String
+  capAmount         Decimal?  @map("cap_amount") @db.Decimal(10, 2)
+  softBlock         Boolean   @default(false) @map("soft_block")
+  nearThresholdPct  Int       @default(80) @map("near_threshold_pct")
+  periodStart       DateTime? @map("period_start")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tags Tag[]
+
+  @@map("categories")
+}
+
+enum PaymentStatus {
+  CREATED
+  SUCCESS
+  FAILED
+  PENDING
+  MANUAL
+}
+
+enum Platform {
+  ANDROID
+  IOS
+}
+
+model PaymentIntent {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  trRef       String        @unique @map("tr_ref") // Transaction reference
+  vpa         String        // Virtual Payment Address
+  payeeName   String?       @map("payee_name")
+  amount      Decimal       @db.Decimal(10, 2)
+  currency    String        @default("INR")
+  status      PaymentStatus @default(CREATED)
+  platform    Platform?
+  entrypoint  String? // Where the payment was initiated from
+  noteLong    String?       @map("note_long")
+  initiatedAt DateTime      @default(now()) @map("initiated_at")
+  completedAt DateTime?     @map("completed_at")
+  upiTxnRef   String?       @map("upi_txn_ref") // UPI transaction reference from PSP
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tags  Tag[]
+  memos Memo[]
+
+  @@map("payment_intents")
+}
+
+enum TagSource {
+  AUTO
+  MANUAL
+}
+
+model Tag {
+  id              String        @id @default(cuid())
+  paymentIntentId String        @map("payment_intent_id")
+  categoryId      String        @map("category_id")
+  tagText         String        @map("tag_text")
+  source          TagSource     @default(AUTO)
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  // Relations
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+  category      Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@map("tags")
+}
+
+enum MemoType {
+  TEXT
+  VOICE
+}
+
+model Memo {
+  id              String        @id @default(cuid())
+  paymentIntentId String        @map("payment_intent_id")
+  type            MemoType
+  textEncrypted   String?       @map("text_encrypted") // AES-GCM encrypted
+  transcript      String?       // Voice-to-text transcript
+  lang            String?       // Language code (e.g., "en", "hi")
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  // Relations
+  paymentIntent PaymentIntent  @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+  attachments   Attachment[]
+
+  @@map("memos")
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  memoId    String   @map("memo_id")
+  mediaType String   @map("media_type") // MIME type
+  objectKey String   @map("object_key") // S3 object key
+  durationMs Int?    @map("duration_ms") // For audio files
+  sizeBytes  Int      @map("size_bytes")
+  checksum   String   // SHA-256 checksum
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  // Relations
+  memo Memo @relation(fields: [memoId], references: [id], onDelete: Cascade)
+
+  @@map("attachments")
+}
+
+// Indices for performance
+model UserMonthlySpend {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  categoryId String   @map("category_id")
+  year       Int
+  month      Int
+  amount     Decimal  @db.Decimal(12, 2)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, categoryId, year, month])
+  @@map("user_monthly_spends")
+}

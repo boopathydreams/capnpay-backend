@@ -1,0 +1,120 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Setup: DB Up (PostgreSQL + Migrate)",
+      "type": "shell",
+      "command": "npm run db:up",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Setup: S3 Up (Minio)",
+      "type": "shell",
+      "command": "npm run s3:up",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Dev: Start API Server",
+      "type": "shell",
+      "command": "npm run start:dev",
+      "isBackground": true,
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "problemMatcher": {
+        "pattern": [
+          {
+            "regexp": ".*"
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*starting.*",
+          "endsPattern": "^.*Nest application successfully started.*"
+        }
+      },
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Setup: DB Up (PostgreSQL + Migrate)",
+        "Setup: S3 Up (Minio)"
+      ]
+    },
+    {
+      "label": "Dev: Full Stack Setup",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Setup: DB Up (PostgreSQL + Migrate)",
+        "Setup: S3 Up (Minio)",
+        "Dev: Start API Server"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "Tools: Prisma Studio",
+      "type": "shell",
+      "command": "npx prisma studio",
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "new",
+        "showReuseMessage": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Tools: Database Reset",
+      "type": "shell",
+      "command": "npm run db:reset",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Cleanup: Stop All Services",
+      "type": "shell",
+      "command": "npm run db:down",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
