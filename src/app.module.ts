@@ -9,6 +9,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { PaymentIntentsModule } from './payment-intents/payment-intents.module';
 import { CategoriesModule } from './categories/categories.module';
 import { UpiModule } from './upi/upi.module';
+import { DecentroModule } from './decentro/decentro.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { UpiModule } from './upi/upi.module';
     PaymentIntentsModule,
     CategoriesModule,
     UpiModule,
+    DecentroModule,
   ],
   controllers: [AppController],
   providers: [AppService],

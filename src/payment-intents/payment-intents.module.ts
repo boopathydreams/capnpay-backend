@@ -5,8 +5,10 @@ import { UpiService } from '../upi/upi.service';
 import { MockUpiDirectoryService } from '../upi/upi-directory.service';
 import { TaggingService } from '../tagging/tagging.service';
 import { CapsService } from '../caps/caps.service';
+import { DecentroModule } from '../decentro/decentro.module';
 
 @Module({
+  imports: [DecentroModule],
   controllers: [PaymentIntentsController],
   providers: [
     PaymentIntentsService,

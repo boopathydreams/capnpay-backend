@@ -128,6 +128,46 @@ export class PaymentIntentsController {
     });
   }
 
+  @Post('escrow')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Create escrow payment intent',
+    description: 'Create secure escrow payment: user pays us, we pay recipient',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Escrow payment intent created with collection link',
+    type: Object,
+  })
+  async createEscrow(
+    @Body()
+    escrowDto: {
+      amount: number;
+      recipientVpa: string;
+      recipientName?: string;
+      category?: string;
+      note?: string;
+    },
+  ) {
+    // TODO: Get userId from authenticated user context
+    const userId = 'temp-user-id'; // Replace with actual user from JWT
+
+    return this.paymentIntentsService.createEscrowPayment(userId, escrowDto);
+  }
+
+  @Get(':referenceId/status')
+  @ApiOperation({
+    summary: 'Get escrow payment status',
+    description: 'Check real-time status of escrow payment flow',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Payment status with current stage',
+  })
+  async getEscrowStatus(@Param('referenceId') referenceId: string) {
+    return this.paymentIntentsService.getEscrowPaymentStatus(referenceId);
+  }
+
   @Post('analyze')
   @ApiOperation({
     summary: 'Analyze payment in real-time',

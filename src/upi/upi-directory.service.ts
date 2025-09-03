@@ -34,6 +34,12 @@ export class MockUpiDirectoryService implements IUpiDirectoryProvider {
         handle: 'paytm',
       },
       {
+        phone: '+919994678569',
+        vpa: 'boopathy.nr@okicici',
+        name: 'Jane Smith',
+        handle: 'phonepe',
+      },
+      {
         phone: '+918765432109',
         vpa: 'jane.smith@phonepe',
         name: 'Jane Smith',

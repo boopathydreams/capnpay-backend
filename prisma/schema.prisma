@@ -153,3 +153,58 @@ model UserMonthlySpend {
   @@unique([userId, categoryId, year, month])
   @@map("user_monthly_spends")
 }
+
+enum EscrowStatus {
+  INITIATED
+  PAID
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+model EscrowTransaction {
+  id                    String        @id // Custom ID format: CAPN_ESCROW_timestamp_hash
+  payerUpi             String        @map("payer_upi")
+  recipientUpi         String        @map("recipient_upi")
+  amount               Decimal       @db.Decimal(10, 2)
+  note                 String
+  status               EscrowStatus  @default(INITIATED)
+  escrowCollectionId   String?       @map("escrow_collection_id") // Decentro collection transaction ID
+  escrowPayoutId       String?       @map("escrow_payout_id")     // Decentro payout transaction ID
+  collectionStatus     String?       @map("collection_status")    // Collection webhook status
+  payoutStatus         String?       @map("payout_status")        // Payout webhook status
+  retryCount           Int           @default(0) @map("retry_count")
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
+
+  @@index([payerUpi])
+  @@index([recipientUpi])
+  @@index([escrowCollectionId])
+  @@index([escrowPayoutId])
+  @@index([status])
+  @@map("escrow_transactions")
+}
+
+model EscrowPayment {
+  id                  String    @id @default(cuid())
+  referenceId         String    @unique @map("reference_id")
+  userId              String    @map("user_id")
+  amount              Decimal   @db.Decimal(10, 2)
+  recipientVpa        String    @map("recipient_vpa")
+  recipientName       String?   @map("recipient_name")
+  category            String?
+  note                String?
+  status              String    @default("collection_created")
+  collectionTxnId     String    @map("collection_txn_id")
+  payoutTxnId         String?   @map("payout_txn_id")
+  payoutInitiatedAt   DateTime? @map("payout_initiated_at")
+  completedAt         DateTime? @map("completed_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  @@index([referenceId])
+  @@index([userId])
+  @@index([status])
+  @@map("escrow_payments")
+}

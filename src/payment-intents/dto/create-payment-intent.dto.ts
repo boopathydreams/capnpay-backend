@@ -47,6 +47,11 @@ export class CreatePaymentIntentDto {
     required: false,
   })
   @IsOptional()
+  @ApiProperty({
+    description: 'Long note for transaction',
+    required: false,
+  })
+  @IsOptional()
   @IsString()
   noteLong?: string;
 
@@ -58,4 +63,13 @@ export class CreatePaymentIntentDto {
   @IsOptional()
   @IsEnum(Platform)
   platform?: Platform;
+
+  @ApiProperty({
+    description: 'Preferred UPI app package name for app-specific deep link',
+    example: 'com.phonepe.app',
+    required: false,
+  })
+  @IsOptional()
+  @IsString()
+  packageName?: string;
 }
