@@ -10,7 +10,13 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { UseGuards } from '@nestjs/common';
 import { PaymentIntentsService } from './payment-intents.service';
@@ -22,10 +28,13 @@ import {
   CompletePaymentIntentResponseDto,
 } from './dto';
 import { PaymentStatus } from '@prisma/client';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @ApiTags('Payment Intents')
 @Controller('pay-intents')
-@UseGuards(ThrottlerGuard)
+@UseGuards(ThrottlerGuard, JwtAuthGuard)
+@ApiBearerAuth()
 export class PaymentIntentsController {
   constructor(private readonly paymentIntentsService: PaymentIntentsService) {}
 
@@ -42,12 +51,10 @@ export class PaymentIntentsController {
     type: CreatePaymentIntentResponseDto,
   })
   async create(
+    @CurrentUser() user: any,
     @Body() createPaymentIntentDto: CreatePaymentIntentDto,
   ): Promise<CreatePaymentIntentResponseDto> {
-    // TODO: Get userId from authenticated user context
-    const userId = 'temp-user-id'; // Replace with actual user from JWT
-
-    return this.paymentIntentsService.create(userId, createPaymentIntentDto);
+    return this.paymentIntentsService.create(user.id, createPaymentIntentDto);
   }
 
   @Post(':trRef/complete')
@@ -112,15 +119,13 @@ export class PaymentIntentsController {
   @ApiQuery({ name: 'categoryId', required: false, type: String })
   @ApiQuery({ name: 'status', required: false, enum: PaymentStatus })
   async getUserHistory(
+    @CurrentUser() user: any,
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
     @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
     @Query('categoryId') categoryId?: string,
     @Query('status') status?: PaymentStatus,
   ) {
-    // TODO: Get userId from authenticated user context
-    const userId = 'temp-user-id'; // Replace with actual user from JWT
-
-    return this.paymentIntentsService.getUserPaymentHistory(userId, {
+    return this.paymentIntentsService.getUserPaymentHistory(user.id, {
       limit,
       offset,
       categoryId,
@@ -129,17 +134,13 @@ export class PaymentIntentsController {
   }
 
   @Post('escrow')
-  @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Create escrow payment intent',
-    description: 'Create secure escrow payment: user pays us, we pay recipient',
+    summary: 'Create escrow payment',
+    description:
+      'Start escrow flow with conditions and multi-step verification',
   })
-  @ApiResponse({
-    status: 200,
-    description: 'Escrow payment intent created with collection link',
-    type: Object,
-  })
-  async createEscrow(
+  async createEscrowPayment(
+    @CurrentUser() user: any,
     @Body()
     escrowDto: {
       amount: number;
@@ -149,10 +150,7 @@ export class PaymentIntentsController {
       note?: string;
     },
   ) {
-    // TODO: Get userId from authenticated user context
-    const userId = 'temp-user-id'; // Replace with actual user from JWT
-
-    return this.paymentIntentsService.createEscrowPayment(userId, escrowDto);
+    return this.paymentIntentsService.createEscrowPayment(user.id, escrowDto);
   }
 
   @Get(':referenceId/status')
@@ -180,12 +178,12 @@ export class PaymentIntentsController {
     type: Object,
   })
   @HttpCode(HttpStatus.OK)
-  async analyzePayment(@Body() dto: AnalyzePaymentDto) {
-    // TODO: Get userId from authenticated user context
-    const userId = 'temp-user-id'; // Replace with actual user from JWT
-
+  async analyzePayment(
+    @CurrentUser() user: any,
+    @Body() dto: AnalyzePaymentDto,
+  ) {
     return this.paymentIntentsService.analyzePayment(
-      userId,
+      user.id,
       dto.amount,
       dto.vpa,
       dto.payeeName,

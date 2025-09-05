@@ -1,16 +1,38 @@
-import { Controller, Get } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Controller, Get, UseGuards } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { DashboardService } from './dashboard.service';
-import { DashboardInsights } from './dto/dashboard.dto';
-// import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-// import { CurrentUser } from '../auth/decorators/current-user.decorator';
-// import { User } from '../users/entities/user.entity';
+import { DashboardInsights, DashboardOverview } from './dto/dashboard.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @ApiTags('Dashboard')
 @Controller('dashboard')
-// @UseGuards(JwtAuthGuard) // TODO: Enable when auth is implemented
+@UseGuards(JwtAuthGuard)
+@ApiBearerAuth()
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Get dashboard overview',
+    description:
+      'Returns complete dashboard data including user spending summary, category caps, upcoming bills, and recent activity',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Dashboard overview retrieved successfully',
+    type: 'object',
+  })
+  async getDashboardOverview(
+    @CurrentUser() user: any,
+  ): Promise<DashboardOverview> {
+    return this.dashboardService.getDashboardOverview(user.id);
+  }
 
   @Get('insights')
   @ApiOperation({
@@ -23,10 +45,10 @@ export class DashboardController {
     description: 'Dashboard insights retrieved successfully',
     type: 'object',
   })
-  async getDashboardInsights(): Promise<DashboardInsights> {
-    // For now, use mock user ID until auth is implemented
-    const mockUserId = 'mock-user-123';
-    return this.dashboardService.getDashboardInsights(mockUserId);
+  async getDashboardInsights(
+    @CurrentUser() user: any,
+  ): Promise<DashboardInsights> {
+    return this.dashboardService.getDashboardInsights(user.id);
   }
 
   @Get('spending-trend')
@@ -38,8 +60,7 @@ export class DashboardController {
     status: 200,
     description: 'Spending trend data retrieved successfully',
   })
-  async getSpendingTrend() {
-    const mockUserId = 'mock-user-123';
-    return this.dashboardService.getSpendingTrend(mockUserId);
+  async getSpendingTrend(@CurrentUser() user: any) {
+    return this.dashboardService.getSpendingTrend(user.id);
   }
 }

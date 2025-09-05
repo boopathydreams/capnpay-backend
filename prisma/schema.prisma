@@ -11,18 +11,47 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  phoneE164 String   @unique @map("phone_e164")
-  name      String?
-  avatarUrl String?  @map("avatar_url")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id                    String    @id @default(cuid())
+  phoneE164             String    @unique @map("phone_e164")
+  name                  String?
+  avatarUrl             String?   @map("avatar_url")
+  isOnboardingComplete  Boolean   @default(false) @map("is_onboarding_complete")
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
+  monthlySalary         Decimal?  @map("monthly_salary") @db.Decimal(12, 2)
+  currency              String    @default("INR")
+  timeZone              String?   @map("time_zone")
+  language              String    @default("en")
+  notificationsEnabled  Boolean   @default(true) @map("notifications_enabled")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   // Relations
   categories     Category[]
   paymentIntents PaymentIntent[]
+  userSettings   UserSettings?
+  spendingCaps   SpendingCap[]
 
   @@map("users")
+}
+
+model UserSettings {
+  id                   String   @id @default(cuid())
+  userId               String   @unique @map("user_id")
+  themePreference      String   @default("system") // "light", "dark", "system"
+  biometricEnabled     Boolean  @default(false) @map("biometric_enabled")
+  transactionAlerts    Boolean  @default(true) @map("transaction_alerts")
+  budgetAlerts         Boolean  @default(true) @map("budget_alerts")
+  monthlyReports       Boolean  @default(true) @map("monthly_reports")
+  marketingEmails      Boolean  @default(false) @map("marketing_emails")
+  autoTagging          Boolean  @default(true) @map("auto_tagging")
+  spendingInsights     Boolean  @default(true) @map("spending_insights")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
 }
 
 model Category {
@@ -40,8 +69,32 @@ model Category {
   // Relations
   user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   tags Tag[]
+  spendingCaps SpendingCap[]
 
+  @@unique([userId, name])
   @@map("categories")
+}
+
+model SpendingCap {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  categoryId   String   @map("category_id")
+  categoryName String   @map("category_name")
+  color        String
+  description  String?
+  dailyLimit   Decimal  @map("daily_limit") @db.Decimal(10, 2)
+  weeklyLimit  Decimal  @map("weekly_limit") @db.Decimal(10, 2)
+  monthlyLimit Decimal  @map("monthly_limit") @db.Decimal(10, 2)
+  isEnabled    Boolean  @default(true) @map("is_enabled")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, categoryId])
+  @@map("spending_caps")
 }
 
 enum PaymentStatus {

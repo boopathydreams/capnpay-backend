@@ -138,7 +138,61 @@ export class PaymentIntentsService {
       },
     });
 
+    // If payment is successful, automatically tag it with the suggested category
+    if (dto.status === 'SUCCESS') {
+      await this.autoTagSuccessfulPayment(paymentIntent);
+    }
+
     return { ok: true };
+  }
+
+  /**
+   * Automatically tag successful payment with suggested category
+   */
+  private async autoTagSuccessfulPayment(paymentIntent: any) {
+    try {
+      // Build tagging context
+      const now = new Date();
+      const context = {
+        userId: paymentIntent.userId,
+        vpa: paymentIntent.vpa,
+        payeeName: paymentIntent.payeeName,
+        amount: Number(paymentIntent.amount),
+        timeOfDay: now.getHours(),
+        dayOfWeek: now.getDay(),
+      };
+
+      // Get AI tagging suggestion for this payment
+      const tagSuggestion = await this.taggingService.suggestTag(context);
+
+      if (tagSuggestion && tagSuggestion.categoryId) {
+        // Check if the payment is already tagged
+        const existingTag = await this.prisma.tag.findFirst({
+          where: {
+            paymentIntentId: paymentIntent.id,
+          },
+        });
+
+        // Only auto-tag if not already tagged
+        if (!existingTag) {
+          await this.prisma.tag.create({
+            data: {
+              paymentIntentId: paymentIntent.id,
+              categoryId: tagSuggestion.categoryId,
+              tagText: tagSuggestion.tagText,
+              source: 'AUTO',
+            },
+          });
+
+          console.log(
+            `Auto-tagged payment ${paymentIntent.trRef} with category ${tagSuggestion.category?.name}`,
+          );
+        }
+      }
+    } catch (error) {
+      // Log error but don't fail the payment completion
+      console.error('Failed to auto-tag payment:', error);
+    }
   }
 
   /**

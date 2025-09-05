@@ -10,6 +10,9 @@ import { PaymentIntentsModule } from './payment-intents/payment-intents.module';
 import { CategoriesModule } from './categories/categories.module';
 import { UpiModule } from './upi/upi.module';
 import { DecentroModule } from './decentro/decentro.module';
+import { AuthModule } from './auth/auth.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -40,6 +43,9 @@ import { DecentroModule } from './decentro/decentro.module';
       },
     }),
     PrismaModule,
+    AuthModule,
+    OnboardingModule,
+    UsersModule,
     DashboardModule,
     PaymentIntentsModule,
     CategoriesModule,

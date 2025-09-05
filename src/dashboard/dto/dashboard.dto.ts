@@ -34,3 +34,27 @@ export interface TransactionSummary {
   date: string;
   status: 'success' | 'pending' | 'failed';
 }
+
+// New interfaces to match mobile app requirements
+export interface DashboardOverview {
+  userData: UserSpendingSummary;
+  capsData: CategorySpendingCap[];
+  upcomingBills: UpcomingBill[];
+  recentActivity: TransactionSummary[];
+}
+
+export interface UserSpendingSummary {
+  totalSpent: number; // MTD spend
+  monthlyLimit: number; // Monthly cap
+  safeToSpendToday: number;
+  projectedMonthEnd: number;
+}
+
+export interface CategorySpendingCap {
+  name: string;
+  spent: number;
+  limit: number;
+  progress: number; // percentage
+  status: 'OK' | 'NEAR' | 'OVER';
+  color: string;
+}

@@ -391,7 +391,11 @@ export class DecentroService {
     // Real API call to Decentro Initiate Payout endpoint
     const payload = {
       reference_id: dto.reference_id,
-      purpose_message: (dto.purpose_message || 'Payout').substring(0, 35), // Max 35 chars, alphanumeric only
+      purpose_message: (dto.purpose_message || 'Payout')
+        .replace(/[.@#$%^&*!;:'"~`?=+)(]/g, '') // Remove problematic special characters
+        .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+        .trim() // Remove leading/trailing spaces
+        .substring(0, 35), // Max 35 chars
       //   consumer_urn: 'AABDA545910E494A955665CF450EAD3A',
       from_account: '462515900201897530', // Our registered escrow account name with Decentro
       transfer_type: 'UPI',
