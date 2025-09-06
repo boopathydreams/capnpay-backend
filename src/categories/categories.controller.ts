@@ -1,34 +1,46 @@
-import { Controller, Get } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Get, UseGuards } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { CategoriesService } from './categories.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @ApiTags('Categories')
 @Controller('categories')
+@UseGuards(JwtAuthGuard)
+@ApiBearerAuth()
 export class CategoriesController {
   constructor(private readonly categoriesService: CategoriesService) {}
 
   @Get()
   @ApiOperation({
-    summary: 'Get user categories',
-    description: 'Retrieve all categories for the authenticated user',
+    summary: 'Get all categories for the user',
+    description:
+      'Returns all spending categories available for the authenticated user',
   })
-  async getUserCategories() {
-    // TODO: Get userId from authenticated user context
-    // For now, create a test user if it doesn't exist
-    let userId = 'temp-user-id';
+  @ApiResponse({
+    status: 200,
+    description: 'Categories retrieved successfully',
+  })
+  async getUserCategories(@CurrentUser() user: any) {
+    return await this.categoriesService.getUserCategories(user.id);
+  }
 
-    // Check if test user exists, create if not
-    const existingUser =
-      await this.categoriesService.findOrCreateTestUser(userId);
-    userId = existingUser.id;
-
-    let categories = await this.categoriesService.getUserCategories(userId);
-
-    // Seed default categories if none exist
-    if (categories.length === 0) {
-      categories = await this.categoriesService.seedDefaultCategories(userId);
-    }
-
-    return categories;
+  @Get('spending-caps')
+  @ApiOperation({
+    summary: 'Get all spending caps with details',
+    description:
+      'Returns all spending caps for the user with current usage and limits',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Spending caps retrieved successfully',
+  })
+  async getUserSpendingCaps(@CurrentUser() user: any) {
+    return await this.categoriesService.getUserSpendingCapsDetailed(user.id);
   }
 }

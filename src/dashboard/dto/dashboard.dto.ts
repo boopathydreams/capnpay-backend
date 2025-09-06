@@ -57,4 +57,5 @@ export interface CategorySpendingCap {
   progress: number; // percentage
   status: 'OK' | 'NEAR' | 'OVER';
   color: string;
+  progressColor: string; // Dynamic color based on progress
 }

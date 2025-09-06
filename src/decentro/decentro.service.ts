@@ -99,6 +99,82 @@ export class DecentroService {
     return this.configService.getOrThrow<string>('DECENTRO_CLIENT_SECRET');
   }
 
+  private get isDevEnvironment(): boolean {
+    return (
+      this.configService.get<string>('NODE_ENV', 'development') ===
+      'development'
+    );
+  }
+
+  /**
+   * Interprets transaction status considering environment-specific rules
+   * In dev: 'pending' for payouts is treated as success
+   * In prod: only actual success statuses are considered success
+   */
+  private interpretTransactionStatus(
+    apiResponse: any,
+    type: 'collection' | 'payout',
+  ): {
+    isApiSuccess: boolean;
+    actualTransactionStatus: string;
+    isTransactionSuccess: boolean;
+    statusDescription: string;
+  } {
+    const isApiSuccess =
+      apiResponse.api_status === 'SUCCESS' ||
+      apiResponse.api_status === 'success';
+    const actualTransactionStatus =
+      apiResponse.data?.transaction_description?.transaction_status ||
+      apiResponse.data?.transaction_status ||
+      'unknown';
+
+    let isTransactionSuccess = false;
+    let statusDescription = `Transaction status: ${actualTransactionStatus}`;
+
+    if (!isApiSuccess) {
+      isTransactionSuccess = false;
+      statusDescription = `API call failed: ${apiResponse.message || 'Unknown error'}`;
+    } else if (
+      actualTransactionStatus === 'success' ||
+      actualTransactionStatus === 'SUCCESS'
+    ) {
+      isTransactionSuccess = true;
+      statusDescription = 'Transaction completed successfully';
+    } else if (actualTransactionStatus.toLowerCase() === 'pending') {
+      if (type === 'payout' && this.isDevEnvironment) {
+        // In dev, payout pending is treated as success
+        isTransactionSuccess = true;
+        statusDescription =
+          'Payout pending (treated as success in dev environment)';
+      } else if (type === 'collection') {
+        // Collections can be pending and still valid
+        isTransactionSuccess = true;
+        statusDescription = 'Collection pending (valid state)';
+      } else {
+        // Production payout pending - wait for actual completion
+        isTransactionSuccess = false;
+        statusDescription =
+          'Payout pending (waiting for completion in production)';
+      }
+    } else if (
+      actualTransactionStatus === 'failed' ||
+      actualTransactionStatus === 'failure'
+    ) {
+      isTransactionSuccess = false;
+      statusDescription = 'Transaction failed';
+    } else {
+      isTransactionSuccess = false;
+      statusDescription = `Unknown transaction status: ${actualTransactionStatus}`;
+    }
+
+    return {
+      isApiSuccess,
+      actualTransactionStatus,
+      isTransactionSuccess,
+      statusDescription,
+    };
+  }
+
   private get coreBankingClientId(): string {
     return this.configService.getOrThrow<string>(
       'COREBANKING_DECENTRO_CLIENT_ID',
@@ -449,9 +525,19 @@ export class DecentroService {
 
   /**
    * Check transaction status
-   * Uses Decentro Payment Status API v2
+   * Uses different endpoints for collections vs payouts
    */
-  async getTransactionStatus(transactionId: string): Promise<any> {
+  async getTransactionStatus(
+    transactionId: string,
+    type: 'collection' | 'payout' = 'collection',
+  ): Promise<any> {
+    console.log('🔍 DEBUG: getTransactionStatus called with:', {
+      transactionId,
+      type,
+      typeTypeOf: typeof type,
+      originalArgs: [transactionId, type],
+    });
+
     if (this.mockMode) {
       return {
         decentro_txn_id: transactionId,
@@ -466,38 +552,39 @@ export class DecentroService {
     }
 
     try {
-      // Use payments API with client credentials headers (not JWT)
+      let url: string;
+      let headers: any;
+
+      if (type === 'payout') {
+        // For payouts, use core_banking API
+        url = `${this.coreBankingBaseUrl}/v3/core_banking/money_transfer/get_status?decentro_txn_id=${transactionId}`;
+        headers = await this.getHeaders('core_banking');
+      } else {
+        // For collections, use payments API with client credentials headers
+        url = `${this.paymentsBaseUrl}/v3/payments/transaction/advance/status?decentro_txn_id=${transactionId}`;
+        headers = {
+          'Content-Type': 'application/json',
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+        };
+      }
 
       this.logger.debug('=== TRANSACTION STATUS DEBUG START ===');
-      console.log(
-        'URL:',
-        `${this.paymentsBaseUrl}/v3/payments/transaction/advance/status?decentro_txn_id=${transactionId}`,
-      );
-      console.log('Headers:', {
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-      });
+      console.log('Type:', type);
+      console.log('URL:', url);
+      console.log('Headers:', { ...headers, client_secret: '[REDACTED]' });
       console.log('Transaction ID:', transactionId);
       this.logger.debug('=== TRANSACTION STATUS DEBUG END ===');
 
       const response = await firstValueFrom(
-        this.httpService.get(
-          `${this.paymentsBaseUrl}/v3/payments/transaction/advance/status?decentro_txn_id=${transactionId}`,
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              client_id: this.clientId,
-              client_secret: this.clientSecret,
-            },
-          },
-        ),
+        this.httpService.get(url, { headers }),
       );
 
       this.logger.log(
         `Transaction status for ${transactionId}: ${
           response.data.data?.transaction_description?.transaction_status ||
-          response.data.status ||
           response.data.data?.transaction_status ||
+          response.data.status ||
           'undefined'
         }`,
       );
@@ -505,9 +592,30 @@ export class DecentroService {
       // Enhanced logging for debugging
       console.log('Full API Response:', JSON.stringify(response.data, null, 2));
 
-      return response.data;
+      // Interpret the transaction status using our helper
+      const statusInterpretation = this.interpretTransactionStatus(
+        response.data,
+        type,
+      );
+
+      console.log('🔍 Transaction Status Interpretation:', {
+        transactionId,
+        type,
+        isApiSuccess: statusInterpretation.isApiSuccess,
+        actualTransactionStatus: statusInterpretation.actualTransactionStatus,
+        isTransactionSuccess: statusInterpretation.isTransactionSuccess,
+        statusDescription: statusInterpretation.statusDescription,
+        environment: this.isDevEnvironment ? 'development' : 'production',
+      });
+
+      // Return enhanced response with interpretation
+      return {
+        ...response.data,
+        statusInterpretation,
+      };
     } catch (error) {
       console.log('=== TRANSACTION STATUS ERROR DETAILS ===');
+      console.log('Type:', type);
       console.log('Status:', error.response?.status);
       console.log('Status Text:', error.response?.statusText);
       console.log('Error Data:', JSON.stringify(error.response?.data, null, 2));

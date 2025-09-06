@@ -157,12 +157,17 @@ export class DashboardService {
       const progress = limit > 0 ? (spent / limit) * 100 : 0;
 
       let status: 'OK' | 'NEAR' | 'OVER';
+      let progressColor: string;
+
       if (progress >= 100) {
         status = 'OVER';
+        progressColor = '#EF4444'; // Red
       } else if (progress >= 80) {
         status = 'NEAR';
+        progressColor = '#F59E0B'; // Orange/Amber
       } else {
         status = 'OK';
+        progressColor = '#10B981'; // Green
       }
 
       capsData.push({
@@ -172,6 +177,7 @@ export class DashboardService {
         progress: Math.round(progress),
         status,
         color: cap.color,
+        progressColor, // New field for dynamic progress bar color
       });
     }
 
@@ -220,19 +226,26 @@ export class DashboardService {
   }
 
   /**
-   * Get recent transaction activity
+   * Get recent transaction activity (limit to 5 for home screen)
    */
-  async getRecentActivity(userId: string): Promise<TransactionSummary[]> {
+  async getRecentActivity(
+    userId: string,
+    limit: number = 5,
+  ): Promise<TransactionSummary[]> {
     const recentTransactions = await this.prisma.paymentIntent.findMany({
-      where: { userId },
-      orderBy: { completedAt: 'desc' },
-      take: 10,
+      where: {
+        userId,
+        status: 'SUCCESS',
+      },
+      orderBy: {
+        completedAt: 'desc',
+      },
+      take: limit,
       include: {
         tags: {
           include: {
             category: true,
           },
-          take: 1, // Get the primary category
         },
       },
     });
@@ -241,14 +254,9 @@ export class DashboardService {
       id: txn.id,
       amount: Number(txn.amount),
       payeeName: txn.payeeName || 'Unknown',
-      category: txn.tags[0]?.category.name || 'Other',
+      category: txn.tags[0]?.category?.name || 'Other',
       date: txn.completedAt?.toISOString() || txn.createdAt.toISOString(),
-      status:
-        txn.status === 'SUCCESS'
-          ? 'success'
-          : txn.status === 'PENDING'
-            ? 'pending'
-            : 'failed',
+      status: 'success',
     }));
   }
 
@@ -346,6 +354,217 @@ export class DashboardService {
         months.reduce((sum, m) => sum + m.spent, 0) / months.length,
       highestMonth: Math.max(...months.map((m) => m.spent)),
       lowestMonth: Math.min(...months.map((m) => m.spent)),
+    };
+  }
+
+  /**
+   * Get transactions for a specific category
+   */
+  async getCategoryTransactions(
+    userId: string,
+    categoryName: string,
+    limit?: number,
+  ) {
+    // Find the category
+    const category = await this.prisma.category.findFirst({
+      where: {
+        userId,
+        name: {
+          equals: categoryName,
+          mode: 'insensitive',
+        },
+      },
+    });
+
+    if (!category) {
+      throw new Error(`Category '${categoryName}' not found`);
+    }
+
+    // Get transactions for this category
+    const transactions = await this.prisma.paymentIntent.findMany({
+      where: {
+        userId,
+        status: 'SUCCESS',
+        tags: {
+          some: {
+            categoryId: category.id,
+          },
+        },
+      },
+      include: {
+        tags: {
+          include: {
+            category: true,
+          },
+        },
+      },
+      orderBy: {
+        completedAt: 'desc',
+      },
+      take: limit,
+    });
+
+    return {
+      category: {
+        id: category.id,
+        name: category.name,
+        color: category.color,
+      },
+      transactions: transactions.map((txn) => ({
+        id: txn.id,
+        amount: Number(txn.amount),
+        payeeName: txn.payeeName || 'Unknown',
+        vpa: txn.vpa,
+        date: txn.completedAt?.toISOString() || txn.createdAt.toISOString(),
+        status: txn.status.toLowerCase(),
+        note: txn.noteLong,
+        trRef: txn.trRef,
+      })),
+      summary: {
+        totalTransactions: transactions.length,
+        totalAmount: transactions.reduce(
+          (sum, txn) => sum + Number(txn.amount),
+          0,
+        ),
+      },
+    };
+  }
+
+  /**
+   * Get all transactions for the user with pagination
+   */
+  async getAllTransactions(userId: string, limit?: number, offset?: number) {
+    const transactions = await this.prisma.paymentIntent.findMany({
+      where: {
+        userId,
+        status: 'SUCCESS',
+      },
+      include: {
+        tags: {
+          include: {
+            category: true,
+          },
+        },
+      },
+      orderBy: {
+        completedAt: 'desc',
+      },
+      take: limit,
+      skip: offset,
+    });
+
+    const totalCount = await this.prisma.paymentIntent.count({
+      where: {
+        userId,
+        status: 'SUCCESS',
+      },
+    });
+
+    return {
+      transactions: transactions.map((txn) => ({
+        id: txn.id,
+        amount: Number(txn.amount),
+        payeeName: txn.payeeName || 'Unknown',
+        vpa: txn.vpa,
+        date: txn.completedAt?.toISOString() || txn.createdAt.toISOString(),
+        status: txn.status.toLowerCase(),
+        category: txn.tags[0]?.category?.name || 'Other',
+        note: txn.noteLong,
+        trRef: txn.trRef,
+      })),
+      pagination: {
+        total: totalCount,
+        limit: limit || totalCount,
+        offset: offset || 0,
+        hasMore: (offset || 0) + (limit || totalCount) < totalCount,
+      },
+    };
+  }
+
+  /**
+   * Get comprehensive caps overview with detailed spending information
+   */
+  async getCapsOverview(userId: string) {
+    const currentMonth = new Date();
+    const startOfMonth = new Date(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth(),
+      1,
+    );
+
+    // Get user's spending caps
+    const spendingCaps = await this.prisma.spendingCap.findMany({
+      where: { userId, isEnabled: true },
+      include: {
+        category: true,
+      },
+    });
+
+    let totalBudget = 0;
+    let totalSpent = 0;
+    const caps = [];
+
+    for (const cap of spendingCaps) {
+      // Get transactions for this category this month
+      const categoryTransactions = await this.prisma.paymentIntent.findMany({
+        where: {
+          userId,
+          status: 'SUCCESS',
+          completedAt: {
+            gte: startOfMonth,
+            lte: new Date(),
+          },
+          tags: {
+            some: {
+              categoryId: cap.categoryId,
+            },
+          },
+        },
+        select: { amount: true },
+      });
+
+      const spent = categoryTransactions.reduce(
+        (sum, txn) => sum + Number(txn.amount),
+        0,
+      );
+
+      const limit = Number(cap.monthlyLimit);
+      const progressPercent = limit > 0 ? (spent / limit) * 100 : 0;
+      const remaining = Math.max(0, limit - spent);
+
+      let progressColor: string;
+      if (progressPercent >= 90) {
+        progressColor = 'red';
+      } else if (progressPercent >= 70) {
+        progressColor = 'orange';
+      } else {
+        progressColor = 'green';
+      }
+
+      totalBudget += limit;
+      totalSpent += spent;
+
+      caps.push({
+        category: cap.categoryName,
+        limit,
+        spent,
+        remaining,
+        progressPercent: Math.round(progressPercent * 10) / 10, // Round to 1 decimal
+        progressColor,
+        transactionCount: categoryTransactions.length,
+      });
+    }
+
+    const totalRemaining = Math.max(0, totalBudget - totalSpent);
+    const overallProgress =
+      totalBudget > 0 ? (totalSpent / totalBudget) * 100 : 0;
+
+    return {
+      totalBudget,
+      totalSpent,
+      totalRemaining,
+      overallProgress: Math.round(overallProgress * 10) / 10, // Round to 1 decimal
+      caps,
     };
   }
 }

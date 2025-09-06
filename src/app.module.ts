@@ -13,6 +13,8 @@ import { DecentroModule } from './decentro/decentro.module';
 import { AuthModule } from './auth/auth.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { UsersModule } from './users/users.module';
+import { ContactsModule } from './contacts/contacts.module';
+import { MemosModule } from './memos/memos.module';
 
 @Module({
   imports: [
@@ -51,6 +53,8 @@ import { UsersModule } from './users/users.module';
     CategoriesModule,
     UpiModule,
     DecentroModule,
+    ContactsModule,
+    MemosModule,
   ],
   controllers: [AppController],
   providers: [AppService],

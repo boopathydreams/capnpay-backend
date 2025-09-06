@@ -125,13 +125,21 @@ model PaymentIntent {
   initiatedAt DateTime      @default(now()) @map("initiated_at")
   completedAt DateTime?     @map("completed_at")
   upiTxnRef   String?       @map("upi_txn_ref") // UPI transaction reference from PSP
+
+  // Enhanced metadata
+  categoryOverride String?  @map("category_override") // User-selected category for this transaction
+  isReceiptGenerated Boolean @default(false) @map("is_receipt_generated")
+  receiptViewed     Boolean @default(false) @map("receipt_viewed")
+
   createdAt   DateTime      @default(now()) @map("created_at")
   updatedAt   DateTime      @updatedAt @map("updated_at")
 
   // Relations
-  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tags  Tag[]
-  memos Memo[]
+  user              User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tags              Tag[]
+  memos             Memo[]
+  receipt           PaymentReceipt?
+  analytics         TransactionAnalytics?
 
   @@map("payment_intents")
 }
@@ -167,8 +175,12 @@ model Memo {
   type            MemoType
   textEncrypted   String?       @map("text_encrypted") // AES-GCM encrypted
   transcript      String?       // Voice-to-text transcript
+  transcriptConfidence Float?   @map("transcript_confidence") // AI transcription confidence score
   lang            String?       // Language code (e.g., "en", "hi")
+  durationMs      Int?          @map("duration_ms") // Duration for voice memos
+  isProcessed     Boolean       @default(false) @map("is_processed") // Whether transcription is complete
   createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
 
   // Relations
   paymentIntent PaymentIntent  @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
@@ -182,15 +194,94 @@ model Attachment {
   memoId    String   @map("memo_id")
   mediaType String   @map("media_type") // MIME type
   objectKey String   @map("object_key") // S3 object key
+  fileName  String?  @map("file_name") // Original file name
   durationMs Int?    @map("duration_ms") // For audio files
   sizeBytes  Int      @map("size_bytes")
   checksum   String   // SHA-256 checksum
+  uploadUrl  String?  @map("upload_url") // Presigned upload URL (temporary)
+  downloadUrl String? @map("download_url") // Presigned download URL (temporary)
+  isUploaded Boolean  @default(false) @map("is_uploaded") // Whether file is uploaded to S3
   createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   // Relations
   memo Memo @relation(fields: [memoId], references: [id], onDelete: Cascade)
 
   @@map("attachments")
+}
+
+// Enhanced Payment Receipt model for detailed transaction records
+model PaymentReceipt {
+  id                   String        @id @default(cuid())
+  paymentIntentId      String        @unique @map("payment_intent_id")
+  receiptNumber        String        @unique @map("receipt_number") // Sequential receipt number
+
+  // Collection Details (Money coming in from user)
+  collectionId         String?       @map("collection_id")
+  collectionAmount     Decimal?      @db.Decimal(10, 2) @map("collection_amount")
+  collectionFee        Decimal?      @db.Decimal(10, 2) @map("collection_fee")
+  collectionStatus     String?       @map("collection_status")
+  collectionReference  String?       @map("collection_reference")
+  collectionCompletedAt DateTime?    @map("collection_completed_at")
+
+  // Payout Details (Money going out to recipient)
+  payoutId            String?        @map("payout_id")
+  payoutAmount        Decimal?       @db.Decimal(10, 2) @map("payout_amount")
+  payoutFee           Decimal?       @db.Decimal(10, 2) @map("payout_fee")
+  payoutStatus        String?        @map("payout_status")
+  payoutReference     String?        @map("payout_reference")
+  payoutCompletedAt   DateTime?      @map("payout_completed_at")
+
+  // Totals and Summary
+  totalAmount         Decimal        @db.Decimal(10, 2) @map("total_amount")
+  totalFees           Decimal        @db.Decimal(10, 2) @map("total_fees")
+  netAmount           Decimal        @db.Decimal(10, 2) @map("net_amount")
+
+  // Receipt Metadata
+  issuedAt            DateTime       @default(now()) @map("issued_at")
+  createdAt           DateTime       @default(now()) @map("created_at")
+  updatedAt           DateTime       @updatedAt @map("updated_at")
+
+  // Relations
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@map("payment_receipts")
+}
+
+// Transaction Analytics for better insights
+model TransactionAnalytics {
+  id                String    @id @default(cuid())
+  paymentIntentId   String    @unique @map("payment_intent_id")
+
+  // Behavioral Analytics
+  timeOfDay         Int       @map("time_of_day") // Hour 0-23
+  dayOfWeek         Int       @map("day_of_week") // 0-6 (Sunday=0)
+  isWeekend         Boolean   @map("is_weekend")
+  merchantType      String?   @map("merchant_type") // "restaurant", "retail", "transport", etc.
+  location          String?   // Geographical location if available
+
+  // Amount Analytics
+  isRoundAmount     Boolean   @map("is_round_amount") // Is it 100, 500, 1000, etc.
+  amountCategory    String    @map("amount_category") // "micro", "small", "medium", "large"
+  frequencyScore    Float?    @map("frequency_score") // How often user pays this amount
+
+  // Relationship Analytics
+  isNewRecipient    Boolean   @map("is_new_recipient")
+  recipientTrustScore Float?  @map("recipient_trust_score")
+  relationshipType  String?   @map("relationship_type") // "personal", "merchant", "professional"
+
+  // Pattern Analysis
+  isRecurring       Boolean   @map("is_recurring")
+  recurringPattern  String?   @map("recurring_pattern") // "daily", "weekly", "monthly"
+  similarTransactionCount Int @map("similar_transaction_count")
+
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@map("transaction_analytics")
 }
 
 // Indices for performance

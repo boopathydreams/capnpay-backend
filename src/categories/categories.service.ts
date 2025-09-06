@@ -75,4 +75,89 @@ export class CategoriesService {
       where: { id },
     });
   }
+
+  /**
+   * Get detailed spending caps with current usage
+   */
+  async getUserSpendingCapsDetailed(userId: string) {
+    const currentMonth = new Date();
+    const startOfMonth = new Date(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth(),
+      1,
+    );
+
+    // Get user's spending caps
+    const spendingCaps = await this.prisma.spendingCap.findMany({
+      where: { userId, isEnabled: true },
+      include: {
+        category: true,
+      },
+    });
+
+    const capsWithUsage = await Promise.all(
+      spendingCaps.map(async (cap) => {
+        // Get transactions for this category this month
+        const categoryTransactions = await this.prisma.paymentIntent.findMany({
+          where: {
+            userId,
+            status: 'SUCCESS',
+            completedAt: {
+              gte: startOfMonth,
+              lte: new Date(),
+            },
+            tags: {
+              some: {
+                categoryId: cap.categoryId,
+              },
+            },
+          },
+          select: { amount: true },
+        });
+
+        const spent = categoryTransactions.reduce(
+          (sum, txn) => sum + Number(txn.amount),
+          0,
+        );
+
+        const limit = Number(cap.monthlyLimit);
+        const progress = limit > 0 ? (spent / limit) * 100 : 0;
+
+        let status: 'OK' | 'NEAR' | 'OVER';
+        let progressColor: string;
+
+        if (progress >= 100) {
+          status = 'OVER';
+          progressColor = '#EF4444'; // Red
+        } else if (progress >= 80) {
+          status = 'NEAR';
+          progressColor = '#F59E0B'; // Orange/Amber
+        } else {
+          status = 'OK';
+          progressColor = '#10B981'; // Green
+        }
+
+        return {
+          id: cap.id,
+          name: cap.categoryName,
+          spent,
+          limit,
+          progress: Math.round(progress),
+          status,
+          color: cap.color,
+          progressColor,
+          description: cap.description,
+          dailyLimit: Number(cap.dailyLimit),
+          weeklyLimit: Number(cap.weeklyLimit),
+        };
+      }),
+    );
+
+    return {
+      caps: capsWithUsage,
+      totalCaps: capsWithUsage.length,
+      totalSpent: capsWithUsage.reduce((sum, cap) => sum + cap.spent, 0),
+      totalLimit: capsWithUsage.reduce((sum, cap) => sum + cap.limit, 0),
+    };
+  }
 }

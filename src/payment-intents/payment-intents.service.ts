@@ -8,6 +8,7 @@ import { UpiService } from '../upi/upi.service';
 import { TaggingService } from '../tagging/tagging.service';
 import { CapsService } from '../caps/caps.service';
 import { DecentroService } from '../decentro/decentro.service';
+import { PaymentReceiptService } from './payment-receipt.service';
 import { CreatePaymentIntentDto, CompletePaymentIntentDto } from './dto';
 import {
   CreatePaymentIntentResponseDto,
@@ -23,6 +24,7 @@ export class PaymentIntentsService {
     private readonly taggingService: TaggingService,
     private readonly capsService: CapsService,
     private readonly decentroService: DecentroService,
+    private readonly paymentReceiptService: PaymentReceiptService,
   ) {}
 
   /**
@@ -141,6 +143,15 @@ export class PaymentIntentsService {
     // If payment is successful, automatically tag it with the suggested category
     if (dto.status === 'SUCCESS') {
       await this.autoTagSuccessfulPayment(paymentIntent);
+
+      // Generate payment receipt
+      try {
+        await this.paymentReceiptService.generateReceipt(paymentIntent.id);
+        console.log('✅ Payment receipt generated for:', paymentIntent.trRef);
+      } catch (error) {
+        console.error('❌ Failed to generate receipt:', error.message);
+        // Don't fail the whole payment for receipt generation issues
+      }
     }
 
     return { ok: true };
@@ -445,6 +456,7 @@ export class PaymentIntentsService {
       // Check collection payment status
       const collectionStatus = await this.decentroService.getTransactionStatus(
         escrowTransaction.escrowCollectionId,
+        'collection',
       );
 
       console.log('📊 Collection status:', {
@@ -603,42 +615,95 @@ export class PaymentIntentsService {
           payoutTxnId: escrowTransaction.escrowPayoutId,
         });
 
-        // TEMPORARY: Return success immediately for payout to avoid timing issues
-        // TODO: Implement proper payout status checking with retry logic
+        console.log('🔍 ABOUT TO ENTER TRY BLOCK FOR PAYOUT STATUS CHECK');
+
+        // Check payout status with proper interpretation
         try {
-          const payoutStatus = await this.decentroService.getTransactionStatus(
-            escrowTransaction.escrowPayoutId,
+          console.log(
+            '🚀 Checking payout status with enhanced interpretation:',
+            {
+              payoutTxnId: escrowTransaction.escrowPayoutId,
+              typeParam: 'payout',
+            },
           );
+
+          const payoutStatusResponse =
+            await this.decentroService.getTransactionStatus(
+              escrowTransaction.escrowPayoutId,
+              'payout',
+            );
 
           console.log('📊 Payout status response:', {
             referenceId,
             payoutTxnId: escrowTransaction.escrowPayoutId,
-            fullResponse: payoutStatus,
+            fullResponse: payoutStatusResponse,
+            statusInterpretation: payoutStatusResponse.statusInterpretation,
           });
 
-          // For now, assume payout is successful if no error
-          console.log('✅ Payout assumed successful (temporary logic)');
+          // Use the proper status interpretation
+          const payoutStatusInterpretation =
+            payoutStatusResponse.statusInterpretation;
+
+          if (payoutStatusInterpretation.isTransactionSuccess) {
+            console.log(
+              '✅ Payout successful:',
+              payoutStatusInterpretation.statusDescription,
+            );
+
+            // Mark as completed
+            await this.prisma.escrowTransaction.update({
+              where: { id: referenceId },
+              data: {
+                status: 'COMPLETED',
+              },
+            });
+
+            return {
+              status: 'payout_completed',
+              message: 'Payment completed successfully!',
+              collectionStatus: 'success',
+              payoutStatus: 'success',
+              payoutDetails: {
+                actualStatus:
+                  payoutStatusInterpretation.actualTransactionStatus,
+                description: payoutStatusInterpretation.statusDescription,
+              },
+            };
+          } else {
+            console.log(
+              '⏳ Payout not yet successful:',
+              payoutStatusInterpretation.statusDescription,
+            );
+
+            return {
+              status: 'payout_pending',
+              message: 'Payout in progress, please check again shortly',
+              collectionStatus: 'success',
+              payoutStatus: 'pending',
+              payoutDetails: {
+                actualStatus:
+                  payoutStatusInterpretation.actualTransactionStatus,
+                description: payoutStatusInterpretation.statusDescription,
+              },
+            };
+          }
         } catch (error) {
-          console.log(
-            '⚠️ Payout status check failed (expected due to timing), assuming success:',
-            error.message,
-          );
+          console.log('⚠️ Payout status check failed:', error.message);
+
+          // In case of error, mark as failed
+          await this.prisma.escrowTransaction.update({
+            where: { id: referenceId },
+            data: { status: 'FAILED' },
+          });
+
+          return {
+            status: 'payout_failed',
+            message: 'Payout verification failed',
+            collectionStatus: 'success',
+            payoutStatus: 'failed',
+            error: error.message,
+          };
         }
-
-        // Mark as completed regardless of status check result (temporary fix)
-        await this.prisma.escrowTransaction.update({
-          where: { id: referenceId },
-          data: {
-            status: 'COMPLETED',
-          },
-        });
-
-        return {
-          status: 'payout_completed',
-          message: 'Payment completed successfully!',
-          collectionStatus: 'success',
-          payoutStatus: 'success',
-        };
       }
 
       // If collection failed
@@ -677,6 +742,37 @@ export class PaymentIntentsService {
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Get payment receipt for a specific payment
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async getPaymentReceipt(_userId: string, _paymentId: string) {
+    // TODO: Fix Prisma model access - temporarily disabled
+    throw new NotFoundException('Receipt service temporarily unavailable');
+
+    /*
+    // Verify payment belongs to user
+    const paymentIntent = await this.prisma.paymentIntent.findFirst({
+      where: { id: paymentId, userId },
+    });
+
+    if (!paymentIntent) {
+      throw new NotFoundException('Payment not found');
+    }
+
+    // Get the receipt
+    const receipt = await this.prisma.paymentReceipt.findUnique({
+      where: { paymentIntentId: paymentId },
+    });
+
+    if (!receipt) {
+      throw new NotFoundException('Receipt not found');
+    }
+
+    return receipt;
+    */
   }
 
   private getStatusMessage(status: string): string {

@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, UseGuards, Param, Query } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -62,5 +62,65 @@ export class DashboardController {
   })
   async getSpendingTrend(@CurrentUser() user: any) {
     return this.dashboardService.getSpendingTrend(user.id);
+  }
+
+  @Get('categories/:categoryName/transactions')
+  @ApiOperation({
+    summary: 'Get transactions for a specific category',
+    description:
+      'Returns all transactions for the specified category with optional limit',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Category transactions retrieved successfully',
+  })
+  async getCategoryTransactions(
+    @CurrentUser() user: any,
+    @Param('categoryName') categoryName: string,
+    @Query('limit') limit?: string,
+  ) {
+    const limitNum = limit ? parseInt(limit, 10) : undefined;
+    return await this.dashboardService.getCategoryTransactions(
+      user.id,
+      categoryName,
+      limitNum,
+    );
+  }
+
+  @Get('caps-overview')
+  @ApiOperation({
+    summary: 'Get comprehensive caps overview',
+    description:
+      'Returns detailed information about all spending caps including progress, remaining amounts, and overall budget summary',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Caps overview retrieved successfully',
+  })
+  async getCapsOverview(@CurrentUser() user: any) {
+    return this.dashboardService.getCapsOverview(user.id);
+  }
+
+  @Get('transactions')
+  @ApiOperation({
+    summary: 'Get all transactions',
+    description: 'Returns all user transactions with pagination support',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'All transactions retrieved successfully',
+  })
+  async getAllTransactions(
+    @CurrentUser() user: any,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const limitNum = limit ? parseInt(limit, 10) : undefined;
+    const offsetNum = offset ? parseInt(offset, 10) : undefined;
+    return this.dashboardService.getAllTransactions(
+      user.id,
+      limitNum,
+      offsetNum,
+    );
   }
 }

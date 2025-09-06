@@ -189,4 +189,20 @@ export class PaymentIntentsController {
       dto.payeeName,
     );
   }
+
+  @Get(':paymentId/receipt')
+  @ApiOperation({
+    summary: 'Get payment receipt',
+    description: 'Get the receipt for a completed payment',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Payment receipt retrieved successfully',
+  })
+  async getPaymentReceipt(
+    @CurrentUser() user: any,
+    @Param('paymentId') paymentId: string,
+  ) {
+    return this.paymentIntentsService.getPaymentReceipt(user.id, paymentId);
+  }
 }
