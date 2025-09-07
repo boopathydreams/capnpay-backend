@@ -10,6 +10,75 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Enhanced enums for banking standards
+enum UserType {
+  APP_USER
+  VPA_ONLY
+}
+
+enum KycStatus {
+  NOT_STARTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BLOCKED
+}
+
+enum PaymentType {
+  P2P
+  P2M
+  ESCROW
+}
+
+enum TransferType {
+  UPI
+  RTGS
+  IMPS
+  NEFT
+  NACH
+}
+
+enum CollectionStatus {
+  INITIATED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum RefundStatus {
+  INITIATED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum AuditAction {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  CANCELLED
+  REFUNDED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 model User {
   id                    String    @id @default(cuid())
   phoneE164             String    @unique @map("phone_e164")
@@ -25,11 +94,29 @@ model User {
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
+  // Enhanced banking fields
+  userType              UserType    @default(APP_USER) @map("user_type")
+  kycStatus             KycStatus   @default(NOT_STARTED) @map("kyc_status")
+  userStatus            UserStatus  @default(ACTIVE) @map("user_status")
+  primaryVpa            String?     @map("primary_vpa")
+  extractedPhone        String?     @map("extracted_phone")
+  riskScore             Decimal?    @default(0.0) @db.Decimal(3, 2) @map("risk_score")
+  lastActivityAt        DateTime?   @map("last_activity_at")
+  deviceFingerprint     String?     @map("device_fingerprint")
+  blockedReason         String?     @map("blocked_reason")
+  blockedAt             DateTime?   @map("blocked_at")
+  blockedBy             String?     @map("blocked_by")
+
   // Relations
-  categories     Category[]
-  paymentIntents PaymentIntent[]
-  userSettings   UserSettings?
-  spendingCaps   SpendingCap[]
+  categories           Category[]
+  paymentIntents       PaymentIntent[]
+  userSettings         UserSettings?
+  spendingCaps         SpendingCap[]
+
+  // Banking relations
+  vpaIds               VpaRegistry[]
+  sentPayments         BankingPayment[] @relation("PaymentSender")
+  receivedPayments     BankingPayment[] @relation("PaymentReceiver")
 
   @@map("users")
 }
@@ -126,6 +213,10 @@ model PaymentIntent {
   completedAt DateTime?     @map("completed_at")
   upiTxnRef   String?       @map("upi_txn_ref") // UPI transaction reference from PSP
 
+  // Banking system integration
+  bankingPaymentId String?        @unique @map("banking_payment_id") // Link to banking compliance record
+  transferType     TransferType   @default(UPI) @map("transfer_type") // Type of transfer (UPI, RTGS, etc.)
+
   // Enhanced metadata
   categoryOverride String?  @map("category_override") // User-selected category for this transaction
   isReceiptGenerated Boolean @default(false) @map("is_receipt_generated")
@@ -136,6 +227,7 @@ model PaymentIntent {
 
   // Relations
   user              User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankingPayment    BankingPayment?        @relation(fields: [bankingPaymentId], references: [id])
   tags              Tag[]
   memos             Memo[]
   receipt           PaymentReceipt?
@@ -351,4 +443,199 @@ model EscrowPayment {
   @@index([userId])
   @@index([status])
   @@map("escrow_payments")
+}
+
+// ================================
+// BANKING-STANDARD MODELS
+// ================================
+
+// VPA Registry for centralized VPA management
+model VpaRegistry {
+  id                    String      @id @default(cuid())
+  vpaAddress            String      @unique @map("vpa_address")
+  userId                String      @map("user_id")
+  extractedPhone        String?     @map("extracted_phone")
+  bankName              String?     @map("bank_name")
+  isVerified            Boolean     @default(false) @map("is_verified")
+  isPrimary             Boolean     @default(false) @map("is_primary")
+  riskLevel             RiskLevel   @default(LOW) @map("risk_level")
+  verificationAttempts  Int         @default(0) @map("verification_attempts")
+  lastVerifiedAt        DateTime?   @map("last_verified_at")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  updatedAt             DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  user                  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([riskLevel])
+  @@map("vpa_registry")
+}
+
+// Banking-Standard Payment Model
+model BankingPayment {
+  id                    String            @id @default(cuid())
+  senderId              String            @map("sender_id")
+  receiverId            String            @map("receiver_id")
+  amount                Decimal           @db.Decimal(12, 2)
+  currency              String            @default("INR")
+  transferType          TransferType      @default(UPI) @map("transfer_type")
+  paymentType           PaymentType       @default(P2P) @map("payment_type")
+
+  // Collection details (money coming from sender)
+  collectionId          String?           @unique @map("collection_id")
+  collectionStatus      CollectionStatus  @default(INITIATED) @map("collection_status")
+  collectionTxnNo       String?           @map("collection_txn_no")
+  collectionRefNo       String?           @map("collection_ref_no")
+  collectionCompletedAt DateTime?         @map("collection_completed_at")
+
+  // Payout details (money going to receiver)
+  payoutId              String?           @unique @map("payout_id")
+  payoutStatus          PayoutStatus      @default(PENDING) @map("payout_status")
+  payoutTxnNo           String?           @map("payout_txn_no")
+  payoutRefNo           String?           @map("payout_ref_no")
+  payoutCompletedAt     DateTime?         @map("payout_completed_at")
+
+  // Overall status and metadata
+  overallStatus         PaymentStatus     @default(CREATED) @map("overall_status")
+  purpose               String?
+  categoryId            String?           @map("category_id")
+  feeAmount             Decimal?          @default(0.0) @db.Decimal(12, 2) @map("fee_amount")
+  taxAmount             Decimal?          @default(0.0) @db.Decimal(12, 2) @map("tax_amount")
+
+  // Refund management
+  refundId              String?           @unique @map("refund_id")
+  refundStatus          RefundStatus?     @map("refund_status")
+  refundReason          String?           @map("refund_reason")
+
+  // Risk and compliance
+  riskScore             Decimal?          @default(0.0) @db.Decimal(3, 2) @map("risk_score")
+  complianceCheckPassed Boolean           @default(true) @map("compliance_check_passed")
+  fraudFlags            Json?             @map("fraud_flags")
+
+  // Legacy compatibility
+  legacyPaymentIntentId String?           @map("legacy_payment_intent_id")
+
+  createdAt             DateTime          @default(now()) @map("created_at")
+  updatedAt             DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  sender                User              @relation("PaymentSender", fields: [senderId], references: [id], onDelete: Restrict)
+  receiver              User              @relation("PaymentReceiver", fields: [receiverId], references: [id], onDelete: Restrict)
+  paymentIntent         PaymentIntent?    // Link back to payment intent
+  collection            Collection?       @relation(fields: [collectionId], references: [id])
+  payout                Payout?           @relation(fields: [payoutId], references: [id])
+  refund                Refund?           @relation(fields: [refundId], references: [id])
+  auditLogs             PaymentAuditLog[]
+  statusHistory         PaymentStatusHistory[]
+
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([overallStatus])
+  @@index([createdAt])
+  @@index([collectionId])
+  @@index([payoutId])
+  @@map("banking_payments")
+}
+
+// Collection audit table
+model Collection {
+  id              String            @id @default(cuid())
+  decentroTxnId   String            @unique @map("decentro_txn_id")
+  amount          Decimal           @db.Decimal(12, 2)
+  status          CollectionStatus  @default(INITIATED)
+  webhookData     Json?             @map("webhook_data")
+  retryCount      Int               @default(0) @map("retry_count")
+  maxRetries      Int               @default(3) @map("max_retries")
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  payment         BankingPayment?
+
+  @@index([status])
+  @@map("collections")
+}
+
+// Payout audit table
+model Payout {
+  id              String        @id @default(cuid())
+  decentroTxnId   String        @unique @map("decentro_txn_id")
+  amount          Decimal       @db.Decimal(12, 2)
+  recipientVpa    String        @map("recipient_vpa")
+  recipientName   String?       @map("recipient_name")
+  status          PayoutStatus  @default(PENDING)
+  webhookData     Json?         @map("webhook_data")
+  retryCount      Int           @default(0) @map("retry_count")
+  maxRetries      Int           @default(3) @map("max_retries")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  payment         BankingPayment?
+
+  @@index([status])
+  @@index([recipientVpa])
+  @@map("payouts")
+}
+
+// Refund management
+model Refund {
+  id                  String        @id @default(cuid())
+  originalPaymentId   String        @map("original_payment_id")
+  refundTxnId         String?       @map("refund_txn_id")
+  amount              Decimal       @db.Decimal(12, 2)
+  status              RefundStatus  @default(INITIATED)
+  reason              String
+  adminNotes          String?       @map("admin_notes")
+  retryCount          Int           @default(0) @map("retry_count")
+  maxRetries          Int           @default(3) @map("max_retries")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  payment             BankingPayment?
+
+  @@map("refunds")
+}
+
+// Comprehensive audit trail
+model PaymentAuditLog {
+  id                  String        @id @default(cuid())
+  paymentId           String        @map("payment_id")
+  action              AuditAction
+  fromStatus          String?       @map("from_status")
+  toStatus            String?       @map("to_status")
+  metadata            Json?
+  performedBy         String?       @map("performed_by")
+  ipAddress           String?       @map("ip_address")
+  userAgent           String?       @map("user_agent")
+  deviceFingerprint   String?       @map("device_fingerprint")
+  timestamp           DateTime      @default(now())
+
+  // Relations
+  payment             BankingPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([timestamp])
+  @@index([action])
+  @@map("payment_audit_logs")
+}
+
+// Payment Status History
+model PaymentStatusHistory {
+  id              String        @id @default(cuid())
+  paymentId       String        @map("payment_id")
+  status          String
+  subStatus       String?       @map("sub_status")
+  details         Json?
+  systemNotes     String?       @map("system_notes")
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  // Relations
+  payment         BankingPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([createdAt])
+  @@map("payment_status_history")
 }

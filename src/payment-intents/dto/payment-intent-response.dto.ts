@@ -49,23 +49,47 @@ export class CreatePaymentIntentResponseDto {
   suggestedTag: SuggestedTag;
 
   @ApiProperty({
-    description: 'Category ID for suggested tag',
-    example: 'cat_food_123',
+    description: 'Category ID for this payment',
+    example: 'cat_123',
   })
   categoryId: string;
 
   @ApiProperty({
-    description: 'User caps state for this payment',
+    description: 'Current caps state',
     enum: CapsState,
     example: CapsState.OK,
   })
   capsState: CapsState;
 
   @ApiProperty({
-    description: 'Whether payment requires override confirmation',
+    description: 'Whether payment requires caps override',
     example: false,
   })
-  requiresOverride?: boolean;
+  requiresOverride: boolean;
+
+  // Banking-specific fields
+  @ApiProperty({
+    description: 'Unique payment number',
+    example: 'PAY123ABC456',
+    required: false,
+  })
+  paymentNumber?: string;
+
+  @ApiProperty({
+    description: 'Risk score for this payment (0-1)',
+    example: 0.3,
+    required: false,
+  })
+  riskScore?: number;
+
+  @ApiProperty({
+    description: 'Whether payment requires manual review',
+    example: false,
+    required: false,
+  })
+  requiresReview?: boolean;
+
+  // Fees removed: no consumer charges in current model
 }
 
 export class CompletePaymentIntentResponseDto {

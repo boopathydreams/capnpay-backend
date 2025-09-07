@@ -15,6 +15,8 @@ import { OnboardingModule } from './onboarding/onboarding.module';
 import { UsersModule } from './users/users.module';
 import { ContactsModule } from './contacts/contacts.module';
 import { MemosModule } from './memos/memos.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -55,6 +57,8 @@ import { MemosModule } from './memos/memos.module';
     DecentroModule,
     ContactsModule,
     MemosModule,
+    ReconciliationModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

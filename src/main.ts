@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import * as bodyParser from 'body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -13,6 +14,23 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
   const logger = app.get(Logger);
+
+  // Capture raw body for webhook signature verification
+  app.use(
+    bodyParser.json({
+      verify: (req: any, _res, buf) => {
+        req.rawBody = Buffer.from(buf);
+      },
+    }),
+  );
+  app.use(
+    bodyParser.urlencoded({
+      extended: true,
+      verify: (req: any, _res, buf) => {
+        req.rawBody = Buffer.from(buf);
+      },
+    }),
+  );
 
   // Security
   app.use(helmet());

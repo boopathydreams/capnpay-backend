@@ -372,27 +372,30 @@ export class DecentroService {
     // Real API call to Decentro UPI Payment Link endpoint
     const payload = {
       reference_id: dto.reference_id,
-      payee_account: dto.payee_account.replace(/[.@#$%^&*!;:'"~`?=+)(]/g, ''), // Sanitize UPI ID
+      // payee_account: dto.payee_account.replace(/[#$%^&*!;:'"~`?=+)(]/g, ''), // Sanitize UPI ID
       consumer_urn: this.consumerUrn, // Our registered URN with Decentro
       purpose_message:
         dto.purpose_message || `Payment collection`.substring(0, 35), // Max 35 chars
-      generate_qr: dto.generate_qr !== false ? 1 : 0,
-      share_s2s: 0,
-      send_email: dto.send_email !== false && dto.email ? 1 : 0,
-      send_sms: dto.send_sms !== false && dto.mobile ? 1 : 0,
-      customized_qr_with_logo: dto.customized_qr_with_logo !== false ? 1 : 0,
-      expiry_time: dto.expiry_time || 15, // 15 minutes
+      // generate_qr: dto.generate_qr !== false ? 1 : 0,
+      // share_s2s: 0,
+      // send_email: dto.send_email !== false && dto.email ? 1 : 0,
+      // send_sms: dto.send_sms !== false && dto.mobile ? 1 : 0,
+      // customized_qr_with_logo: dto.customized_qr_with_logo !== false ? 1 : 0,
+      // Per v3, expiry_time is in minutes
+      expiry_time: dto.expiry_time ?? 15,
       amount: dto.amount,
       generate_psp_uri: true,
-      customer_details: {
-        customer_name: 'Customer', // Default name since not provided in DTO
-        customer_email: dto.email
-          ? dto.email.replace(/[.@#$%^&*!;:'"~`?=+)(]/g, '')
-          : '',
-        customer_mobile: dto.mobile ? dto.mobile.replace(/[^0-9]/g, '') : '',
-      },
+      // customer_details: {
+      //   customer_name: 'Customer', // Default name since not provided in DTO
+      //   // Preserve valid email characters; just trim whitespace
+      //   customer_email: dto.email ? dto.email.trim() : '',
+      //   customer_mobile: dto.mobile ? dto.mobile.replace(/[^0-9]/g, '') : '',
+      // },
     };
 
+    console.log('=== COLLECTION DEBUG START ===');
+    console.log(payload);
+    console.log('=== COLLECTION DEBUG END ===');
     const headers = await this.getHeaders('payments');
 
     try {
@@ -477,7 +480,7 @@ export class DecentroService {
       transfer_type: 'UPI',
       transfer_amount: dto.amount,
       beneficiary_details: {
-        to_upi: 'boopathynr@okicici', // Keep UPI ID as-is, Decentro allows @ and . in UPI IDs
+        to_upi: dto.payee_account, // Keep UPI ID as-is, Decentro allows @ and . in UPI IDs
         payee_name: 'Boopathy N R',
       },
     };

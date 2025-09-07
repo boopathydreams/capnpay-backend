@@ -17,13 +17,17 @@ export class DashboardService {
   /**
    * Get comprehensive dashboard overview for mobile app
    */
-  async getDashboardOverview(userId: string): Promise<DashboardOverview> {
+  async getDashboardOverview(
+    userId: string,
+    month?: number,
+    year?: number,
+  ): Promise<DashboardOverview> {
     const [userData, capsDataRaw, upcomingBills, recentActivity] =
       await Promise.all([
-        this.getUserSpendingSummary(userId),
-        this.getCategorySpendingCaps(userId),
+        this.getUserSpendingSummary(userId, month, year),
+        this.getCategorySpendingCaps(userId, month, year),
         this.getUpcomingBills(userId),
-        this.getRecentActivity(userId),
+        this.getRecentActivity(userId, 5, month, year),
       ]);
 
     // Deduplicate caps data to ensure unique categories
@@ -40,21 +44,22 @@ export class DashboardService {
   /**
    * Get user spending summary (main dashboard metrics)
    */
-  async getUserSpendingSummary(userId: string): Promise<UserSpendingSummary> {
-    const currentMonth = new Date();
-    const startOfMonth = new Date(
-      currentMonth.getFullYear(),
-      currentMonth.getMonth(),
-      1,
-    );
-    const endOfMonth = new Date(
-      currentMonth.getFullYear(),
-      currentMonth.getMonth() + 1,
-      0,
-    );
+  async getUserSpendingSummary(
+    userId: string,
+    month?: number,
+    year?: number,
+  ): Promise<UserSpendingSummary> {
+    const base = new Date();
+    const y = year ?? base.getFullYear();
+    const m = month !== undefined ? month : base.getMonth();
+    const startOfMonth = new Date(y, m, 1);
+    const endOfMonth = new Date(y, m + 1, 0);
     const today = new Date();
     const daysInMonth = endOfMonth.getDate();
-    const daysPassed = today.getDate();
+    const daysPassed =
+      today.getFullYear() === y && today.getMonth() === m
+        ? today.getDate()
+        : daysInMonth;
     const daysRemaining = daysInMonth - daysPassed;
 
     // Get user's monthly salary/limit
@@ -68,21 +73,21 @@ export class DashboardService {
       ? Number(user.monthlySalary) * 0.8
       : 25000;
 
-    // Get this month's spending
-    const monthlyTransactions = await this.prisma.paymentIntent.findMany({
+    // Get this month's spending from BankingPayment (sent payments only)
+    const monthlyPayments = await this.prisma.bankingPayment.findMany({
       where: {
-        userId,
-        status: 'SUCCESS',
-        completedAt: {
+        senderId: userId,
+        overallStatus: 'SUCCESS',
+        createdAt: {
           gte: startOfMonth,
           lte: new Date(),
         },
       },
-      select: { amount: true, completedAt: true },
+      select: { amount: true, createdAt: true },
     });
 
-    const totalSpent = monthlyTransactions.reduce(
-      (sum, txn) => sum + Number(txn.amount),
+    const totalSpent = monthlyPayments.reduce(
+      (sum, p) => sum + Number(p.amount),
       0,
     );
 
@@ -110,13 +115,14 @@ export class DashboardService {
    */
   async getCategorySpendingCaps(
     userId: string,
+    month?: number,
+    year?: number,
   ): Promise<CategorySpendingCap[]> {
-    const currentMonth = new Date();
-    const startOfMonth = new Date(
-      currentMonth.getFullYear(),
-      currentMonth.getMonth(),
-      1,
-    );
+    const base = new Date();
+    const y = year ?? base.getFullYear();
+    const m = month !== undefined ? month : base.getMonth();
+    const startOfMonth = new Date(y, m, 1);
+    const endOfMonth = new Date(y, m + 1, 0);
 
     // Get user's spending caps
     const spendingCaps = await this.prisma.spendingCap.findMany({
@@ -131,27 +137,41 @@ export class DashboardService {
 
     for (const cap of spendingCaps) {
       // Get transactions for this category this month
-      const categoryTransactions = await this.prisma.paymentIntent.findMany({
+      // Prefer banking payments by category if present; otherwise fall back to legacy tags
+      const bankingSpentAgg = await this.prisma.bankingPayment.aggregate({
+        _sum: { amount: true },
         where: {
-          userId,
-          status: 'SUCCESS',
-          completedAt: {
-            gte: startOfMonth,
-            lte: new Date(),
-          },
-          tags: {
-            some: {
-              categoryId: cap.categoryId,
-            },
-          },
+          senderId: userId,
+          overallStatus: 'SUCCESS',
+          categoryId: cap.categoryId,
+          createdAt: { gte: startOfMonth, lte: endOfMonth },
         },
-        select: { amount: true },
       });
 
-      const spent = categoryTransactions.reduce(
-        (sum, txn) => sum + Number(txn.amount),
-        0,
-      );
+      let spent = Number(bankingSpentAgg._sum.amount || 0);
+
+      if (spent === 0) {
+        const categoryTransactions = await this.prisma.paymentIntent.findMany({
+          where: {
+            userId,
+            status: 'SUCCESS',
+            completedAt: {
+              gte: startOfMonth,
+              lte: endOfMonth,
+            },
+            tags: {
+              some: {
+                categoryId: cap.categoryId,
+              },
+            },
+          },
+          select: { amount: true },
+        });
+        spent = categoryTransactions.reduce(
+          (sum, txn) => sum + Number(txn.amount),
+          0,
+        );
+      }
 
       const limit = Number(cap.monthlyLimit);
       const progress = limit > 0 ? (spent / limit) * 100 : 0;
@@ -231,26 +251,66 @@ export class DashboardService {
   async getRecentActivity(
     userId: string,
     limit: number = 5,
+    month?: number,
+    year?: number,
   ): Promise<TransactionSummary[]> {
-    const recentTransactions = await this.prisma.paymentIntent.findMany({
+    // Optional month filter
+    let createdAtFilter: any | undefined = undefined;
+    if (month !== undefined || year !== undefined) {
+      const base = new Date();
+      const y = year ?? base.getFullYear();
+      const m = month !== undefined ? month : base.getMonth();
+      createdAtFilter = { gte: new Date(y, m, 1), lte: new Date(y, m + 1, 0) };
+    }
+
+    const recentPayments = await this.prisma.bankingPayment.findMany({
       where: {
-        userId,
-        status: 'SUCCESS',
+        OR: [{ senderId: userId }, { receiverId: userId }],
+        ...(createdAtFilter ? { createdAt: createdAtFilter } : {}),
       },
       orderBy: {
-        completedAt: 'desc',
+        createdAt: 'desc',
       },
       take: limit,
       include: {
-        tags: {
-          include: {
-            category: true,
-          },
-        },
+        sender: true,
+        receiver: true,
       },
     });
 
-    return recentTransactions.map((txn) => ({
+    if (recentPayments.length > 0) {
+      return recentPayments.map((p) => {
+        const isSender = p.senderId === userId;
+        const counterparty = isSender ? p.receiver : p.sender;
+        const status = String(p.overallStatus || 'PENDING').toLowerCase();
+        return {
+          id: p.id,
+          amount: Number(p.amount),
+          payeeName:
+            counterparty?.name || counterparty?.primaryVpa || 'Unknown',
+          category: 'Other',
+          date: p.createdAt.toISOString(),
+          status:
+            status === 'success' || status === 'failed'
+              ? (status as any)
+              : 'pending',
+        } as TransactionSummary;
+      });
+    }
+
+    // Fallback to legacy PaymentIntent SUCCESS transactions if no banking payments found
+    const legacyWhere: any = { userId, status: 'SUCCESS' };
+    if (createdAtFilter) {
+      legacyWhere.completedAt = createdAtFilter;
+    }
+    const recentIntents = await this.prisma.paymentIntent.findMany({
+      where: legacyWhere,
+      orderBy: { completedAt: 'desc' },
+      take: limit,
+      include: { tags: { include: { category: true } } },
+    });
+
+    return recentIntents.map((txn) => ({
       id: txn.id,
       amount: Number(txn.amount),
       payeeName: txn.payeeName || 'Unknown',
@@ -263,15 +323,19 @@ export class DashboardService {
   /**
    * Legacy method - get dashboard insights (for existing endpoints)
    */
-  async getDashboardInsights(userId: string): Promise<DashboardInsights> {
+  async getDashboardInsights(
+    userId: string,
+    month?: number,
+    year?: number,
+  ): Promise<DashboardInsights> {
     const currentMonth = new Date().toLocaleDateString('en-US', {
       month: 'long',
       year: 'numeric',
     });
 
     const [userSummary, categoriesRaw, recentTransactions] = await Promise.all([
-      this.getUserSpendingSummary(userId),
-      this.getCategorySpendingCaps(userId),
+      this.getUserSpendingSummary(userId, month, year),
+      this.getCategorySpendingCaps(userId, month, year),
       this.getRecentActivity(userId),
     ]);
 
@@ -312,9 +376,12 @@ export class DashboardService {
   /**
    * Get spending trend over time
    */
-  async getSpendingTrend(userId: string) {
-    const months = [];
-    const currentDate = new Date();
+  async getSpendingTrend(userId: string, month?: number, year?: number) {
+    const months = [] as { month: string; spent: number; budget: number }[];
+    const base = new Date();
+    const baseYear = year ?? base.getFullYear();
+    const baseMonth = month !== undefined ? month : base.getMonth();
+    const currentDate = new Date(baseYear, baseMonth, 1);
 
     for (let i = 5; i >= 0; i--) {
       const date = new Date(currentDate);
@@ -323,12 +390,12 @@ export class DashboardService {
       const startOfMonth = new Date(date.getFullYear(), date.getMonth(), 1);
       const endOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0);
 
-      // Get spending for this month
-      const monthlyTransactions = await this.prisma.paymentIntent.findMany({
+      // Use BankingPayment: outgoing (senderId = user) and SUCCESS
+      const monthlyPayments = await this.prisma.bankingPayment.findMany({
         where: {
-          userId,
-          status: 'SUCCESS',
-          completedAt: {
+          senderId: userId,
+          overallStatus: 'SUCCESS',
+          createdAt: {
             gte: startOfMonth,
             lte: endOfMonth,
           },
@@ -336,8 +403,8 @@ export class DashboardService {
         select: { amount: true },
       });
 
-      const spent = monthlyTransactions.reduce(
-        (sum, txn) => sum + Number(txn.amount),
+      const spent = monthlyPayments.reduce(
+        (sum, p) => sum + Number(p.amount),
         0,
       );
 
@@ -348,12 +415,20 @@ export class DashboardService {
       });
     }
 
+    const averageMonthly = months.length
+      ? months.reduce((sum, m) => sum + m.spent, 0) / months.length
+      : 0;
+    const totals = months.map((m) => m.spent);
+    const highestMonth = totals.length ? Math.max(...totals) : 0;
+    const lowestMonth = totals.length ? Math.min(...totals) : 0;
+
+    // Provide trendData to match mobile API expectations; keep legacy keys as well
     return {
+      trendData: months,
       trend: months,
-      averageMonthly:
-        months.reduce((sum, m) => sum + m.spent, 0) / months.length,
-      highestMonth: Math.max(...months.map((m) => m.spent)),
-      lowestMonth: Math.min(...months.map((m) => m.spent)),
+      averageMonthly,
+      highestMonth,
+      lowestMonth,
     };
   }
 

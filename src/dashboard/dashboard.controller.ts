@@ -30,8 +30,12 @@ export class DashboardController {
   })
   async getDashboardOverview(
     @CurrentUser() user: any,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
   ): Promise<DashboardOverview> {
-    return this.dashboardService.getDashboardOverview(user.id);
+    const m = month ? parseInt(month, 10) : undefined;
+    const y = year ? parseInt(year, 10) : undefined;
+    return this.dashboardService.getDashboardOverview(user.id, m, y);
   }
 
   @Get('insights')
@@ -47,8 +51,12 @@ export class DashboardController {
   })
   async getDashboardInsights(
     @CurrentUser() user: any,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
   ): Promise<DashboardInsights> {
-    return this.dashboardService.getDashboardInsights(user.id);
+    const m = month ? parseInt(month, 10) : undefined;
+    const y = year ? parseInt(year, 10) : undefined;
+    return this.dashboardService.getDashboardInsights(user.id, m, y);
   }
 
   @Get('spending-trend')
@@ -60,8 +68,14 @@ export class DashboardController {
     status: 200,
     description: 'Spending trend data retrieved successfully',
   })
-  async getSpendingTrend(@CurrentUser() user: any) {
-    return this.dashboardService.getSpendingTrend(user.id);
+  async getSpendingTrend(
+    @CurrentUser() user: any,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    const m = month ? parseInt(month, 10) : undefined;
+    const y = year ? parseInt(year, 10) : undefined;
+    return this.dashboardService.getSpendingTrend(user.id, m, y);
   }
 
   @Get('categories/:categoryName/transactions')

@@ -55,13 +55,13 @@ export class CreatePaymentCollectionDto {
   generate_qr?: boolean = true;
 
   @ApiProperty({
-    description: 'Payment link expiry time in seconds',
-    example: 900,
-    default: 900,
+    description: 'Payment link expiry time in minutes',
+    example: 15,
+    default: 15,
   })
   @IsOptional()
   @IsNumber()
-  expiry_time?: number = 900;
+  expiry_time?: number = 15;
 
   @ApiProperty({
     description: 'Mobile number for SMS notification',

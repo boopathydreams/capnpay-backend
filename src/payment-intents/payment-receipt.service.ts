@@ -35,7 +35,7 @@ export class PaymentReceiptService {
       const receiptCount = await this.prisma.paymentReceipt.count();
       const receiptNumber = `CAPN-${Date.now()}-${String(receiptCount + 1).padStart(6, '0')}`;
 
-      // Create receipt with mock collection/payout data
+      // Create receipt without consumer fees
       receipt = await this.prisma.paymentReceipt.create({
         data: {
           paymentIntentId,
@@ -44,7 +44,7 @@ export class PaymentReceiptService {
           // Collection details (money coming from user)
           collectionId: `COLL_${paymentIntent.trRef}`,
           collectionAmount: paymentIntent.amount,
-          collectionFee: Number(paymentIntent.amount) * 0.005, // 0.5% fee
+          collectionFee: 0,
           collectionStatus: 'SUCCESS',
           collectionReference: paymentIntent.upiTxnRef || paymentIntent.trRef,
           collectionCompletedAt: paymentIntent.completedAt,
@@ -52,15 +52,15 @@ export class PaymentReceiptService {
           // Payout details (money going to recipient)
           payoutId: `PAYOUT_${paymentIntent.trRef}`,
           payoutAmount: paymentIntent.amount,
-          payoutFee: Number(paymentIntent.amount) * 0.003, // 0.3% fee
+          payoutFee: 0,
           payoutStatus: 'SUCCESS',
           payoutReference: `PAY_${paymentIntent.trRef}`,
           payoutCompletedAt: paymentIntent.completedAt,
 
           // Totals
           totalAmount: paymentIntent.amount,
-          totalFees: Number(paymentIntent.amount) * 0.008, // 0.8% total fees
-          netAmount: Number(paymentIntent.amount) * 0.992, // Amount after fees
+          totalFees: 0,
+          netAmount: Number(paymentIntent.amount),
         },
       });
 
