@@ -16,6 +16,14 @@ export class WebhookAuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const req = context.switchToHttp().getRequest<any>();
 
+    // Check for development bypass
+    const bypassAuth =
+      this.config.get<string>('WEBHOOK_AUTH_BYPASS', 'false') === 'true';
+    if (bypassAuth) {
+      this.logger.log('🔓 Webhook auth bypassed for development');
+      return true;
+    }
+
     const enforce =
       (this.config.get<string>('DECENTRO_WEBHOOK_ENFORCE', 'false') ||
         'false') === 'true';

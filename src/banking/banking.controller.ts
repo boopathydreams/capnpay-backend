@@ -137,6 +137,15 @@ export class BankingController {
     });
   }
 
+  @Get('payments/:paymentId/collection-status')
+  @ApiOperation({
+    summary: 'Get collection status',
+    description: 'Returns current collection status for mobile polling',
+  })
+  async getCollectionStatus(@Param('paymentId') paymentId: string) {
+    return await this.bankingService.getCollectionStatus(paymentId);
+  }
+
   @Post('payments/:paymentId/payout-status')
   @ApiOperation({
     summary: 'Update payout status (Internal)',
@@ -164,5 +173,24 @@ export class BankingController {
       txnNo: updateDto.txnNo,
       refNo: updateDto.refNo,
     });
+  }
+
+  @Get('payments/:paymentId/payout-status')
+  @ApiOperation({
+    summary: 'Get payout status',
+    description: 'Returns current payout status for mobile polling',
+  })
+  async getPayoutStatus(@Param('paymentId') paymentId: string) {
+    return await this.bankingService.getPayoutStatus(paymentId);
+  }
+
+  @Get('payments/:paymentId/complete-status')
+  @ApiOperation({
+    summary: 'Get complete payment flow status',
+    description:
+      'Returns collection + payout status for webhook-disabled polling',
+  })
+  async getCompletePaymentStatus(@Param('paymentId') paymentId: string) {
+    return await this.bankingService.getCompletePaymentStatus(paymentId);
   }
 }

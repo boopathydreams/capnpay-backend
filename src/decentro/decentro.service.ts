@@ -91,6 +91,15 @@ export class DecentroService {
     );
   }
 
+  private get webhookBaseUrl(): string {
+    // Use ngrok URL in development, production URL in production
+    const baseUrl =
+      this.configService.get<string>('WEBHOOK_BASE_URL') ||
+      this.configService.get<string>('API_BASE_URL') ||
+      'http://localhost:3000';
+    return baseUrl;
+  }
+
   private get clientId(): string {
     return this.configService.getOrThrow<string>('DECENTRO_CLIENT_ID');
   }
@@ -385,6 +394,9 @@ export class DecentroService {
       expiry_time: dto.expiry_time ?? 15,
       amount: dto.amount,
       generate_psp_uri: true,
+      // Add webhook callback URL for collection status updates
+      // callback_url: `${this.webhookBaseUrl}/decentro/webhooks/collection`,
+      // Note: Disabled callback_url due to Decentro special character restrictions
       // customer_details: {
       //   customer_name: 'Customer', // Default name since not provided in DTO
       //   // Preserve valid email characters; just trim whitespace
@@ -483,6 +495,9 @@ export class DecentroService {
         to_upi: dto.payee_account, // Keep UPI ID as-is, Decentro allows @ and . in UPI IDs
         payee_name: 'Boopathy N R',
       },
+      // Add webhook callback URL for payout status updates
+      // callback_url: `${this.webhookBaseUrl}/decentro/webhooks/payout`,
+      // Note: Disabled callback_url due to Decentro special character restrictions
     };
 
     const headers = await this.getHeaders('core_banking');

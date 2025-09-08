@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UpiService } from '../upi/upi.service';
@@ -19,6 +20,8 @@ import { PaymentStatus } from '@prisma/client';
 
 @Injectable()
 export class PaymentIntentsService {
+  private readonly logger = new Logger(PaymentIntentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly upiService: UpiService,
@@ -419,6 +422,7 @@ export class PaymentIntentsService {
       recipientVpa: string;
       recipientName?: string;
       category?: string;
+      categoryId?: string;
       note?: string;
     },
   ) {
@@ -430,27 +434,204 @@ export class PaymentIntentsService {
     // Generate unique reference ID for this escrow transaction
     const referenceId = this.decentroService.generateReferenceId('ESCROW');
 
+    this.logger.log(`Creating complete escrow payment flow for user ${userId}`);
+
+    // Get AI suggested tag for categorization
+    const now = new Date();
+    const tagSuggestion = await this.taggingService.suggestTag({
+      userId,
+      vpa: escrowDto.recipientVpa,
+      payeeName: escrowDto.recipientName,
+      amount: escrowDto.amount,
+      timeOfDay: now.getHours(),
+      dayOfWeek: now.getDay(),
+    });
+
+    // Determine final category ID: prioritize mobile selection, fallback to AI suggestion
+    let finalCategoryId = escrowDto.categoryId || tagSuggestion.categoryId;
+    let finalCategoryName =
+      escrowDto.category || tagSuggestion.category?.name || 'Other';
+
+    // If mobile provided category name but no ID, try to find matching category
+    if (escrowDto.category && !escrowDto.categoryId) {
+      const matchingCategory = await this.prisma.category.findFirst({
+        where: {
+          name: {
+            contains: escrowDto.category,
+            mode: 'insensitive',
+          },
+        },
+      });
+      if (matchingCategory) {
+        finalCategoryId = matchingCategory.id;
+        finalCategoryName = matchingCategory.name;
+      }
+    }
+
     try {
-      // Step 1: Create payment collection (user pays us)
+      // STEP 1: Create PaymentIntent record (MOBILE REQUIREMENT)
+      this.logger.log('Step 1: Creating PaymentIntent record...');
+      const paymentIntent = await this.prisma.paymentIntent.create({
+        data: {
+          userId: userId,
+          trRef: referenceId,
+          vpa: escrowDto.recipientVpa,
+          payeeName: escrowDto.recipientName || 'Unknown',
+          amount: escrowDto.amount,
+          currency: 'INR',
+          status: 'CREATED',
+          platform: 'ANDROID',
+          entrypoint: 'escrow_payment',
+          noteLong:
+            escrowDto.note ||
+            `${escrowDto.category || 'Payment'} via Cap'n Pay`,
+          initiatedAt: new Date(),
+          transferType: 'UPI',
+          isReceiptGenerated: false,
+          receiptViewed: false,
+        },
+      });
+
+      this.logger.log(`✅ PaymentIntent created: ${paymentIntent.id}`);
+
+      // STEP 1.5: Create tag for categorization (IMMEDIATE TAGGING)
+      this.logger.log('Step 1.5: Creating payment tag...');
+      if (finalCategoryId) {
+        try {
+          await this.prisma.tag.create({
+            data: {
+              paymentIntentId: paymentIntent.id,
+              categoryId: finalCategoryId,
+              tagText: `${finalCategoryName} payment`,
+              source: escrowDto.categoryId ? 'MANUAL' : 'AUTO',
+            },
+          });
+          this.logger.log(
+            `✅ Tag created: ${finalCategoryName} (${escrowDto.categoryId ? 'manual' : 'auto'})`,
+          );
+        } catch (tagError) {
+          this.logger.warn(
+            'Failed to create tag during payment creation:',
+            tagError,
+          );
+        }
+      }
+
+      // STEP 2: Create BankingPayment record (BANKING AUDIT)
+      this.logger.log('Step 2: Creating BankingPayment record...');
+      const bankingPayment = await this.prisma.bankingPayment.create({
+        data: {
+          senderId: userId,
+          receiverId: userId, // Will be updated once we create the recipient
+          amount: escrowDto.amount,
+          currency: 'INR',
+          paymentType: 'ESCROW',
+          overallStatus: 'CREATED',
+          collectionStatus: 'INITIATED',
+          payoutStatus: 'PENDING',
+          purpose: `${escrowDto.category || 'Payment'} via Cap'n Pay`,
+          riskScore: 0.0,
+          complianceCheckPassed: true,
+        },
+      });
+
+      this.logger.log(`✅ BankingPayment created: ${bankingPayment.id}`);
+
+      // Link PaymentIntent to BankingPayment for deterministic joins later
+      await this.prisma.paymentIntent
+        .update({
+          where: { id: paymentIntent.id },
+          data: { bankingPaymentId: bankingPayment.id },
+        })
+        .catch(() => undefined);
+
+      // STEP 3: Ensure recipient user exists
+      this.logger.log('Step 3: Ensuring recipient user exists...');
+      let recipientUser = await this.prisma.vpaRegistry.findUnique({
+        where: { vpaAddress: escrowDto.recipientVpa },
+        include: { user: true },
+      });
+
+      if (!recipientUser) {
+        // Create VPA_ONLY user for recipient
+        const uniquePhone = `+91${Date.now().toString().slice(-10)}`;
+        const newRecipientUser = await this.prisma.user.create({
+          data: {
+            phoneE164: uniquePhone,
+            userType: 'VPA_ONLY',
+            kycStatus: 'NOT_STARTED',
+            userStatus: 'ACTIVE',
+          },
+        });
+
+        recipientUser = await this.prisma.vpaRegistry.create({
+          data: {
+            vpaAddress: escrowDto.recipientVpa,
+            userId: newRecipientUser.id,
+            isPrimary: true,
+            isVerified: false,
+          },
+          include: { user: true },
+        });
+      }
+
+      // Update BankingPayment with correct recipient
+      await this.prisma.bankingPayment.update({
+        where: { id: bankingPayment.id },
+        data: { receiverId: recipientUser.userId },
+      });
+
+      this.logger.log(`✅ Recipient user ensured: ${recipientUser.userId}`);
+
+      // STEP 4: Create Collection record
+      this.logger.log('Step 4: Creating Collection record...');
       const sanitizedPurpose = `${escrowDto.category || 'Payment'} via CapnPay`
-        .replace(/[.@#$%^&*!;:'"~`?=+)(]/g, '') // Remove special characters
-        .substring(0, 35); // Max 35 chars
+        .replace(/[.@#$%^&*!;:'"~`?=+)(]/g, '')
+        .substring(0, 35);
 
       const collectionResponse =
         await this.decentroService.createPaymentCollection({
           reference_id: referenceId,
-          payee_account: escrowDto.recipientVpa, // This will be sanitized by Decentro service
+          payee_account: escrowDto.recipientVpa,
           amount: escrowDto.amount,
           purpose_message: sanitizedPurpose,
           generate_qr: true,
-          expiry_time: 15, // 15 minutes
+          expiry_time: 15,
         });
 
-      // Step 2: Store escrow intent in database
-      await this.prisma.escrowTransaction.create({
+      const collection = await this.prisma.collection.create({
+        data: {
+          decentroTxnId: collectionResponse.decentro_txn_id,
+          amount: escrowDto.amount,
+          status: 'INITIATED',
+        },
+      });
+
+      // Link Collection to BankingPayment
+      await this.prisma.bankingPayment.update({
+        where: { id: bankingPayment.id },
+        data: { collectionId: collection.id },
+      });
+
+      this.logger.log(`✅ Collection created: ${collection.decentroTxnId}`);
+
+      // STEP 5: Create EscrowTransaction record
+      this.logger.log('Step 5: Creating EscrowTransaction record...');
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { vpaIds: { where: { isPrimary: true }, take: 1 } },
+      });
+
+      if (!user?.vpaIds?.[0]?.vpaAddress) {
+        throw new BadRequestException(
+          'User must have a primary VPA to create escrow payments',
+        );
+      }
+
+      const escrowTransaction = await this.prisma.escrowTransaction.create({
         data: {
           id: referenceId,
-          payerUpi: 'user@temp', // TODO: Get from authenticated user
+          payerUpi: user.vpaIds[0].vpaAddress,
           recipientUpi: escrowDto.recipientVpa,
           amount: escrowDto.amount,
           note:
@@ -458,26 +639,65 @@ export class PaymentIntentsService {
             `${escrowDto.category || 'Payment'} via Cap'n Pay`,
           status: 'INITIATED',
           escrowCollectionId: collectionResponse.decentro_txn_id,
+          collectionStatus: 'initiated',
+          payoutStatus: 'pending',
           createdAt: new Date(),
         },
       });
 
-      console.log('✅ Escrow payment created:', {
-        referenceId,
-        collectionTxnId: collectionResponse.decentro_txn_id,
-        amount: escrowDto.amount,
-        recipient: escrowDto.recipientVpa,
+      this.logger.log(`✅ EscrowTransaction created: ${escrowTransaction.id}`);
+
+      // STEP 6: Create initial audit log
+      this.logger.log('Step 6: Creating audit log...');
+      await this.prisma.paymentAuditLog.create({
+        data: {
+          paymentId: bankingPayment.id,
+          action: 'CREATED',
+          performedBy: userId,
+          metadata: {
+            referenceId: referenceId,
+            paymentIntentId: paymentIntent.id,
+            escrowTransactionId: escrowTransaction.id,
+            collectionId: collection.decentroTxnId,
+            amount: escrowDto.amount,
+            recipientVpa: escrowDto.recipientVpa,
+            stage: 'payment_initiated',
+          },
+          timestamp: new Date(),
+        },
       });
+
+      // STEP 7: Create initial status history
+      this.logger.log('Step 7: Creating status history...');
+      await this.prisma.paymentStatusHistory.create({
+        data: {
+          paymentId: bankingPayment.id,
+          status: 'CREATED',
+          subStatus: 'collection_initiated',
+          details: {
+            referenceId: referenceId,
+            stage: 'collection_pending',
+            collectionId: collection.decentroTxnId,
+          },
+          systemNotes: 'Payment initiated, collection created',
+          createdAt: new Date(),
+        },
+      });
+
+      this.logger.log('✅ Complete escrow payment flow created successfully!');
 
       return {
         referenceId,
+        paymentIntentId: paymentIntent.id,
+        bankingPaymentId: bankingPayment.id,
+        collectionId: collection.decentroTxnId,
         status: 'collection_created',
         collectionLinks: collectionResponse.data,
         message: 'Escrow payment created. Please complete collection payment.',
-        expiryTime: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes from now
+        expiryTime: new Date(Date.now() + 15 * 60 * 1000),
       };
     } catch (error) {
-      console.error('❌ Escrow payment creation failed:', error);
+      this.logger.error('❌ Complete escrow payment creation failed:', error);
       throw new BadRequestException(
         `Failed to create escrow payment: ${error.message}`,
       );
@@ -485,337 +705,610 @@ export class PaymentIntentsService {
   }
 
   /**
-   * Get escrow payment status and handle automatic payout
+   * Get escrow payment status from database (updated by webhooks)
+   * Mobile apps should use this for real-time status updates
    */
   async getEscrowPaymentStatus(referenceId: string) {
-    // Get escrow record from database
+    this.logger.log(`Getting escrow payment status for ${referenceId}`);
+
+    // Get escrow transaction from database
     const escrowTransaction = await this.prisma.escrowTransaction.findUnique({
-      where: { id: referenceId },
+      where: { id: referenceId }, // The referenceId IS the id in EscrowTransaction
     });
 
     if (!escrowTransaction) {
-      throw new NotFoundException('Escrow payment not found');
+      throw new NotFoundException('Escrow transaction not found');
     }
+
+    this.logger.log(
+      `Found escrow: ${escrowTransaction.id}, status: ${escrowTransaction.status}`,
+    );
+
+    // In webhook-disabled mode, we need to actively poll Decentro API to update status
+    let currentStatus = escrowTransaction.status;
+    let stage = this.determineStage(escrowTransaction);
+    let collectionStatus = escrowTransaction.collectionStatus;
+    let payoutStatus = escrowTransaction.payoutStatus;
 
     try {
-      // Check collection payment status
-      const collectionStatus = await this.decentroService.getTransactionStatus(
-        escrowTransaction.escrowCollectionId,
-      );
-
-      console.log('📊 Collection status:', {
-        referenceId,
-        status: collectionStatus.data?.transaction_status,
-        collectionTxnId: escrowTransaction.escrowCollectionId,
-        fullResponse: collectionStatus,
-      });
-
-      // Parse the collection status from the correct API response structure
-      const transactionStatus =
-        collectionStatus.data?.transaction_description?.transaction_status ||
-        collectionStatus.data?.transaction_status ||
-        collectionStatus.status ||
-        collectionStatus.data?.status ||
-        'pending';
-
-      console.log('📊 Parsed transaction status:', transactionStatus);
-
-      // Map Decentro status to our internal status
-      const mappedStatus =
-        transactionStatus === 'SUCCESS'
-          ? 'success'
-          : transactionStatus === 'FAILED'
-            ? 'failed'
-            : transactionStatus === 'PENDING'
-              ? 'pending'
-              : transactionStatus.toLowerCase();
-
-      // If collection is paid and we haven't started payout yet
+      // Check collection status if we have a collection ID and it's not yet successful
       if (
-        mappedStatus === 'success' &&
-        escrowTransaction.status === 'INITIATED'
+        escrowTransaction.escrowCollectionId &&
+        collectionStatus !== 'success'
       ) {
-        console.log('💰 Collection paid! Starting payout...');
-
-        // Use database transaction to prevent race conditions
-        const updatedTransaction = await this.prisma.$transaction(
-          async (tx) => {
-            // Double-check the status within the transaction to prevent race conditions
-            const currentTransaction = await tx.escrowTransaction.findUnique({
-              where: { id: referenceId },
-            });
-
-            if (
-              !currentTransaction ||
-              currentTransaction.status !== 'INITIATED'
-            ) {
-              // Another request already initiated payout or status changed
-              console.log(
-                '⚠️ Payout already initiated or status changed, skipping...',
-                {
-                  currentStatus: currentTransaction?.status,
-                },
-              );
-              return currentTransaction;
-            }
-
-            // Update status to processing payout atomically
-            const updated = await tx.escrowTransaction.update({
-              where: { id: referenceId },
-              data: { status: 'PROCESSING' },
-            });
-
-            console.log(
-              '✅ Status updated to PROCESSING, proceeding with payout...',
-            );
-            return updated;
-          },
-        );
-
-        // If we successfully updated to PROCESSING, initiate payout
-        if (updatedTransaction && updatedTransaction.status === 'PROCESSING') {
-          try {
-            // Initiate payout to actual recipient
-            const payoutResponse = await this.decentroService.initiatePayout({
-              reference_id: `${referenceId}_PAYOUT`,
-              payee_account: escrowTransaction.recipientUpi,
-              amount: Number(escrowTransaction.amount),
-              purpose_message: escrowTransaction.note || 'Escrow payout',
-              beneficiary_name: escrowTransaction.recipientUpi, // Using UPI as name since we don't store name
-            });
-
-            console.log('💰 Payout initiated successfully:', {
-              referenceId,
-              payoutTxnId: payoutResponse.decentro_txn_id,
-            });
-
-            // Update with payout transaction ID
-            await this.prisma.escrowTransaction.update({
-              where: { id: referenceId },
-              data: {
-                escrowPayoutId: payoutResponse.decentro_txn_id,
-              },
-            });
-
-            return {
-              status: 'processing_payout',
-              message: 'Collection received! Processing payout to recipient...',
-              collectionStatus: 'success',
-              payoutStatus: 'initiated',
-              payoutTxnId: payoutResponse.decentro_txn_id,
-            };
-          } catch (payoutError) {
-            console.error('❌ Payout initiation failed:', payoutError);
-
-            // Check if error is due to duplicate reference (race condition)
-            if (
-              payoutError.message?.includes('Duplicate Request Reference ID')
-            ) {
-              console.log(
-                '🔄 Duplicate payout attempt detected, checking if original payout succeeded...',
-              );
-
-              // Don't mark as failed yet - let the status check handle it
-              // Another process may have already successfully initiated the payout
-              return {
-                status: 'processing_payout',
-                message: 'Processing payout to recipient...',
-                collectionStatus: 'success',
-                payoutStatus: 'checking',
-              };
-            }
-
-            // For other errors, mark as failed
-            await this.prisma.escrowTransaction.update({
-              where: { id: referenceId },
-              data: { status: 'FAILED' },
-            });
-
-            return {
-              status: 'failed',
-              message: `Payout initiation failed: ${payoutError.message}`,
-              error: payoutError.message,
-            };
-          }
-        } else {
-          // Another process already handled this, return current status
-          console.log('⚠️ Payout already in progress by another process');
-          return {
-            status: 'processing_payout',
-            message: 'Collection received! Processing payout to recipient...',
-            collectionStatus: 'success',
-            payoutStatus: 'in_progress',
-          };
-        }
-      }
-
-      // If payout was initiated, check payout status
-      if (
-        escrowTransaction.escrowPayoutId &&
-        escrowTransaction.status === 'PROCESSING'
-      ) {
-        console.log('💰 Payout initiated, checking status for:', {
-          referenceId,
-          payoutTxnId: escrowTransaction.escrowPayoutId,
-        });
-
-        console.log('🔍 ABOUT TO ENTER TRY BLOCK FOR PAYOUT STATUS CHECK');
-
-        // Check payout status with proper interpretation
-        try {
-          console.log(
-            '🚀 Checking payout status with enhanced interpretation:',
-            {
-              payoutTxnId: escrowTransaction.escrowPayoutId,
-              typeParam: 'payout',
-            },
+        this.logger.log('Checking collection status with Decentro API...');
+        const collectionApiStatus =
+          await this.decentroService.getTransactionStatus(
+            escrowTransaction.escrowCollectionId,
+            'collection',
           );
 
-          const payoutStatusResponse =
-            await this.decentroService.getTransactionStatus(
-              escrowTransaction.escrowPayoutId,
-            );
+        const statusInterpretation = this.decentroService[
+          'interpretTransactionStatus'
+        ](collectionApiStatus, 'collection');
 
-          console.log('📊 Payout status response:', {
-            referenceId,
-            payoutTxnId: escrowTransaction.escrowPayoutId,
-            fullResponse: payoutStatusResponse,
-            statusInterpretation: payoutStatusResponse.statusInterpretation,
-          });
+        if (
+          statusInterpretation.isTransactionSuccess &&
+          collectionStatus !== 'success'
+        ) {
+          this.logger.log('Collection successful! Updating database...');
+          const now = new Date();
 
-          // Use the proper status interpretation
-          const payoutStatusInterpretation =
-            payoutStatusResponse.statusInterpretation;
-
-          if (payoutStatusInterpretation.isTransactionSuccess) {
-            console.log(
-              '✅ Payout successful:',
-              payoutStatusInterpretation.statusDescription,
-            );
-
-            // Mark as completed
-            await this.prisma.escrowTransaction.update({
-              where: { id: referenceId },
-              data: {
-                status: 'COMPLETED',
-              },
-            });
-
-            return {
-              status: 'payout_completed',
-              message: 'Payment completed successfully!',
-              collectionStatus: 'success',
-              payoutStatus: 'success',
-              payoutDetails: {
-                actualStatus:
-                  payoutStatusInterpretation.actualTransactionStatus,
-                description: payoutStatusInterpretation.statusDescription,
-              },
-            };
-          } else {
-            console.log(
-              '⏳ Payout not yet successful:',
-              payoutStatusInterpretation.statusDescription,
-            );
-
-            return {
-              status: 'payout_pending',
-              message: 'Payout in progress, please check again shortly',
-              collectionStatus: 'success',
-              payoutStatus: 'pending',
-              payoutDetails: {
-                actualStatus:
-                  payoutStatusInterpretation.actualTransactionStatus,
-                description: payoutStatusInterpretation.statusDescription,
-              },
-            };
-          }
-        } catch (error) {
-          console.log('⚠️ Payout status check failed:', error.message);
-
-          // In case of error, mark as failed
+          // 1) Update EscrowTransaction
           await this.prisma.escrowTransaction.update({
             where: { id: referenceId },
-            data: { status: 'FAILED' },
+            data: {
+              collectionStatus: 'success',
+              updatedAt: now,
+            },
           });
+          collectionStatus = 'success';
 
-          return {
-            status: 'payout_failed',
-            message: 'Payout verification failed',
-            collectionStatus: 'success',
-            payoutStatus: 'failed',
-            error: error.message,
-          };
+          // 2) Update Collection record status to COMPLETED (if exists)
+          const collectionRec = await this.prisma.collection.findFirst({
+            where: { decentroTxnId: escrowTransaction.escrowCollectionId },
+          });
+          if (collectionRec) {
+            await this.prisma.collection.update({
+              where: { id: collectionRec.id },
+              data: { status: 'COMPLETED' },
+            });
+          }
+
+          // 3) Update related BankingPayment collection fields
+          if (collectionRec) {
+            const bp = await this.prisma.bankingPayment.findFirst({
+              where: { collectionId: collectionRec.id },
+            });
+            if (bp) {
+              await this.prisma.bankingPayment.update({
+                where: { id: bp.id },
+                data: {
+                  collectionStatus: 'COMPLETED',
+                  collectionCompletedAt: now,
+                },
+              });
+
+              // 4) Audit + Status history for collection completed
+              await this.prisma.paymentAuditLog
+                .create({
+                  data: {
+                    paymentId: bp.id,
+                    action: 'UPDATED',
+                    performedBy: 'system',
+                    metadata: {
+                      referenceId,
+                      collectionId: escrowTransaction.escrowCollectionId,
+                      stage: 'collection_success',
+                    },
+                    timestamp: now,
+                  },
+                })
+                .catch(() => undefined);
+
+              await this.prisma.paymentStatusHistory
+                .create({
+                  data: {
+                    paymentId: bp.id,
+                    status: 'COLLECTION_COMPLETED',
+                    subStatus: 'success',
+                    details: {
+                      referenceId,
+                      collectionId: escrowTransaction.escrowCollectionId,
+                      stage: 'collection_success',
+                    },
+                    systemNotes: 'Collection succeeded via status polling',
+                    createdAt: now,
+                  },
+                })
+                .catch(() => undefined);
+            }
+          }
         }
       }
 
-      // If collection failed
-      if (mappedStatus === 'failed') {
-        console.log('❌ Collection payment failed');
-        await this.prisma.escrowTransaction.update({
-          where: { id: referenceId },
-          data: { status: 'FAILED' },
-        });
+      // Auto-trigger payout if collection is successful and no payout exists yet
+      if (collectionStatus === 'success' && !escrowTransaction.escrowPayoutId) {
+        this.logger.log('Collection successful, triggering payout...');
+        try {
+          // Create payout via Decentro service
+          const sanitizedPurpose = (escrowTransaction.note || 'Payment payout')
+            .replace(/[^a-zA-Z0-9\s]/g, '') // Remove special characters
+            .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+            .trim()
+            .substring(0, 35); // Limit to 35 characters
 
-        return {
-          status: 'failed',
-          message: 'Collection payment failed',
-          collectionStatus: 'failed',
-        };
+          const payoutResponse = await this.decentroService.initiatePayout({
+            reference_id: `payout_${escrowTransaction.id}`,
+            payee_account: escrowTransaction.recipientUpi,
+            amount: escrowTransaction.amount.toNumber(),
+            purpose_message: sanitizedPurpose,
+          });
+
+          // Create Payout record in database
+          const payoutRecord = await this.prisma.payout.create({
+            data: {
+              decentroTxnId: payoutResponse.decentro_txn_id,
+              amount: escrowTransaction.amount,
+              recipientVpa: escrowTransaction.recipientUpi,
+              recipientName: escrowTransaction.recipientUpi.split('@')[0],
+              status: 'PROCESSING',
+              webhookData: {
+                source: 'auto_payout_initiation',
+                referenceId: escrowTransaction.id,
+                timestamp: new Date().toISOString(),
+                decentroResponse: payoutResponse,
+              },
+            },
+          });
+
+          // Update escrow with payout ID and link to payout record
+          await this.prisma.escrowTransaction.update({
+            where: { id: referenceId },
+            data: {
+              escrowPayoutId: payoutResponse.decentro_txn_id,
+              payoutStatus: 'processing',
+              updatedAt: new Date(),
+            },
+          });
+
+          // Deterministically link payout to BankingPayment via Collection
+          const collectionRec = await this.prisma.collection.findFirst({
+            where: { decentroTxnId: escrowTransaction.escrowCollectionId },
+          });
+          if (collectionRec) {
+            const bankingPayment = await this.prisma.bankingPayment.findFirst({
+              where: { collectionId: collectionRec.id },
+            });
+            if (bankingPayment) {
+              await this.prisma.bankingPayment.update({
+                where: { id: bankingPayment.id },
+                data: {
+                  payoutId: payoutRecord.id,
+                  payoutStatus: 'PROCESSING',
+                },
+              });
+
+              // Audit + Status history for payout initiated
+              await this.prisma.paymentAuditLog
+                .create({
+                  data: {
+                    paymentId: bankingPayment.id,
+                    action: 'CREATED',
+                    performedBy: 'system',
+                    metadata: {
+                      referenceId,
+                      payoutId: payoutResponse.decentro_txn_id,
+                      stage: 'payout_initiated',
+                    },
+                    timestamp: new Date(),
+                  },
+                })
+                .catch(() => undefined);
+              await this.prisma.paymentStatusHistory
+                .create({
+                  data: {
+                    paymentId: bankingPayment.id,
+                    status: 'PAYOUT_INITIATED',
+                    subStatus: 'processing',
+                    details: {
+                      referenceId,
+                      payoutId: payoutResponse.decentro_txn_id,
+                      stage: 'payout_processing',
+                    },
+                    systemNotes: 'Payout started via status polling',
+                    createdAt: new Date(),
+                  },
+                })
+                .catch(() => undefined);
+            }
+          }
+
+          payoutStatus = 'processing';
+          stage = 'payout_initiated';
+        } catch (error) {
+          this.logger.error('Failed to initiate payout:', error);
+        }
       }
 
-      // Collection is still pending (not paid yet)
-      return {
-        status: 'initiated',
-        message: 'Waiting for payment collection...',
-        collectionStatus: mappedStatus,
-      };
+      // Check payout status if we have a payout ID and it's not yet successful
+      if (escrowTransaction.escrowPayoutId && payoutStatus !== 'success') {
+        this.logger.log('Checking payout status with Decentro API...');
+        const payoutApiStatus = await this.decentroService.getTransactionStatus(
+          escrowTransaction.escrowPayoutId,
+          'payout',
+        );
+
+        const statusInterpretation = this.decentroService[
+          'interpretTransactionStatus'
+        ](payoutApiStatus, 'payout');
+
+        if (
+          statusInterpretation.isTransactionSuccess &&
+          payoutStatus !== 'success'
+        ) {
+          this.logger.log('Payout successful! Updating database...');
+
+          // Update EscrowTransaction
+          await this.prisma.escrowTransaction.update({
+            where: { id: referenceId },
+            data: {
+              payoutStatus: 'success',
+              updatedAt: new Date(),
+            },
+          });
+
+          // Update Payout table if record exists
+          const payoutRecord = await this.prisma.payout.findFirst({
+            where: { decentroTxnId: escrowTransaction.escrowPayoutId },
+          });
+
+          if (payoutRecord) {
+            await this.prisma.payout.update({
+              where: { id: payoutRecord.id },
+              data: {
+                status: 'COMPLETED',
+                webhookData: {
+                  ...(payoutRecord.webhookData as Record<string, any>),
+                  completedAt: new Date().toISOString(),
+                  completedViaStatusCheck: true,
+                },
+              },
+            });
+
+            // Update related BankingPayment (first by payoutId, else via collection link)
+            let bankingPayment = await this.prisma.bankingPayment.findFirst({
+              where: { payoutId: payoutRecord.id },
+            });
+
+            if (!bankingPayment) {
+              const collectionRec = await this.prisma.collection.findFirst({
+                where: { decentroTxnId: escrowTransaction.escrowCollectionId },
+              });
+              if (collectionRec) {
+                bankingPayment = await this.prisma.bankingPayment.findFirst({
+                  where: { collectionId: collectionRec.id },
+                });
+              }
+            }
+
+            if (bankingPayment) {
+              await this.prisma.bankingPayment.update({
+                where: { id: bankingPayment.id },
+                data: {
+                  payoutId: payoutRecord.id,
+                  payoutStatus: 'COMPLETED',
+                  payoutCompletedAt: new Date(),
+                  // Ensure collection is marked completed as well
+                  collectionStatus:
+                    bankingPayment.collectionStatus || 'COMPLETED',
+                  overallStatus: 'SUCCESS',
+                },
+              });
+
+              // Reconcile collection completion if not already set
+              const collectionRec2 = await this.prisma.collection.findFirst({
+                where: { decentroTxnId: escrowTransaction.escrowCollectionId },
+              });
+              if (collectionRec2 && collectionRec2.status !== 'COMPLETED') {
+                await this.prisma.collection.update({
+                  where: { id: collectionRec2.id },
+                  data: { status: 'COMPLETED' },
+                });
+              }
+              if (bankingPayment.collectionStatus !== 'COMPLETED') {
+                await this.prisma.bankingPayment.update({
+                  where: { id: bankingPayment.id },
+                  data: {
+                    collectionStatus: 'COMPLETED',
+                    collectionCompletedAt: new Date(),
+                  },
+                });
+              }
+
+              // Audit + Status history for payout completed
+              await this.prisma.paymentAuditLog
+                .create({
+                  data: {
+                    paymentId: bankingPayment.id,
+                    action: 'UPDATED',
+                    performedBy: 'system',
+                    metadata: {
+                      referenceId,
+                      payoutId: escrowTransaction.escrowPayoutId,
+                      stage: 'completed',
+                    },
+                    timestamp: new Date(),
+                  },
+                })
+                .catch(() => undefined);
+              await this.prisma.paymentStatusHistory
+                .create({
+                  data: {
+                    paymentId: bankingPayment.id,
+                    status: 'PAYOUT_COMPLETED',
+                    subStatus: 'success',
+                    details: {
+                      referenceId,
+                      payoutId: escrowTransaction.escrowPayoutId,
+                      stage: 'completed',
+                    },
+                    systemNotes: 'Payout succeeded via status polling',
+                    createdAt: new Date(),
+                  },
+                })
+                .catch(() => undefined);
+            }
+          }
+
+          payoutStatus = 'success';
+        }
+      }
+
+      // Check if escrow should be marked as completed
+      if (
+        collectionStatus === 'success' &&
+        payoutStatus === 'success' &&
+        currentStatus !== 'COMPLETED'
+      ) {
+        await this.prisma.escrowTransaction.update({
+          where: { id: referenceId },
+          data: {
+            status: 'COMPLETED',
+            updatedAt: new Date(),
+          },
+        });
+        currentStatus = 'COMPLETED';
+        stage = 'completed';
+
+        // Mark PaymentIntent as SUCCESS and generate receipt
+        try {
+          // Try to resolve intent via BankingPayment->Collection; fallback by trRef
+          let intent: any = null;
+          let bankingPaymentResolved: any = null;
+          const collectionRec = await this.prisma.collection.findFirst({
+            where: { decentroTxnId: escrowTransaction.escrowCollectionId },
+          });
+          if (collectionRec) {
+            bankingPaymentResolved = await this.prisma.bankingPayment.findFirst(
+              {
+                where: { collectionId: collectionRec.id },
+              },
+            );
+            if (bankingPaymentResolved?.id) {
+              intent = await this.prisma.paymentIntent.findFirst({
+                where: { bankingPaymentId: bankingPaymentResolved.id },
+              });
+            }
+          }
+          if (!intent) {
+            intent = await this.prisma.paymentIntent.findFirst({
+              where: { trRef: referenceId },
+            });
+          }
+          if (intent) {
+            await this.prisma.paymentIntent.update({
+              where: { id: intent.id },
+              data: {
+                status: PaymentStatus.SUCCESS,
+                completedAt: new Date(),
+                upiTxnRef:
+                  escrowTransaction.escrowCollectionId || intent.upiTxnRef,
+              },
+            });
+
+            // Auto-tag successful payment if not already tagged
+            await this.autoTagSuccessfulPayment(intent).catch(() => undefined);
+
+            // Best-effort receipt generation
+            await this.paymentReceiptService
+              .generateReceipt(intent.id)
+              .catch(() => undefined);
+          }
+        } catch (e) {
+          this.logger.warn(
+            'Failed to finalize intent/receipt in non-webhook path',
+            e as any,
+          );
+        }
+      }
     } catch (error) {
-      console.error('❌ Error checking escrow status:', error);
-
-      // Mark as failed
-      await this.prisma.escrowTransaction.update({
-        where: { id: referenceId },
-        data: { status: 'FAILED' },
-      });
-
-      return {
-        status: 'failed',
-        message: 'Payment status check failed',
-        error: error.message,
-      };
+      this.logger.error('Error checking payment status:', error);
+      // Return database status if API calls fail
     }
+
+    // Update stage based on current status
+    const updatedEscrow = {
+      ...escrowTransaction,
+      collectionStatus,
+      payoutStatus,
+      status: currentStatus,
+    };
+    stage = this.determineStage(updatedEscrow);
+
+    return {
+      referenceId,
+      status: currentStatus,
+      stage,
+      collection_status: collectionStatus || 'pending',
+      payout_status: payoutStatus || 'pending',
+      collection_id: escrowTransaction.escrowCollectionId || null,
+      payout_id: escrowTransaction.escrowPayoutId || null,
+      escrow: {
+        id: escrowTransaction.id,
+        amount: escrowTransaction.amount,
+        payerUpi: escrowTransaction.payerUpi,
+        recipientUpi: escrowTransaction.recipientUpi,
+        note: escrowTransaction.note,
+        createdAt: escrowTransaction.createdAt,
+        updatedAt: escrowTransaction.updatedAt,
+        payment_intent: {
+          target_upi: escrowTransaction.recipientUpi,
+          description: escrowTransaction.note,
+        },
+      },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private determineStage(escrow: any): string {
+    if (escrow.status === 'COMPLETED') return 'completed';
+    if (escrow.status === 'FAILED') return 'collection_failed';
+
+    if (!escrow.collectionStatus || escrow.collectionStatus === 'pending')
+      return 'collection_pending';
+    if (escrow.collectionStatus === 'processing')
+      return 'collection_processing';
+
+    if (escrow.collectionStatus === 'success') {
+      if (!escrow.payoutStatus || escrow.payoutStatus === 'pending')
+        return 'collection_success';
+      if (escrow.payoutStatus === 'processing') return 'payout_processing';
+      if (escrow.payoutStatus === 'success') return 'completed';
+      if (escrow.payoutStatus === 'failed') return 'payout_failed';
+    }
+
+    if (escrow.collectionStatus === 'failed') return 'collection_failed';
+
+    return 'unknown';
   }
 
   /**
    * Get payment receipt for a specific payment
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async getPaymentReceipt(_userId: string, _paymentId: string) {
-    // TODO: Fix Prisma model access - temporarily disabled
-    throw new NotFoundException('Receipt service temporarily unavailable');
+  async getPaymentReceipt(userId: string, paymentId: string) {
+    try {
+      // Try multiple approaches to find the payment intent
+      let paymentIntent = null;
 
-    /*
-    // Verify payment belongs to user
-    const paymentIntent = await this.prisma.paymentIntent.findFirst({
-      where: { id: paymentId, userId },
-    });
+      // First try: direct payment intent ID lookup
+      paymentIntent = await this.prisma.paymentIntent.findFirst({
+        where: { id: paymentId, userId },
+        include: {
+          tags: {
+            include: {
+              category: true,
+            },
+          },
+        },
+      });
 
-    if (!paymentIntent) {
-      throw new NotFoundException('Payment not found');
+      // Second try: lookup by trRef (transaction reference)
+      if (!paymentIntent) {
+        paymentIntent = await this.prisma.paymentIntent.findFirst({
+          where: { trRef: paymentId, userId },
+          include: {
+            tags: {
+              include: {
+                category: true,
+              },
+            },
+          },
+        });
+      }
+
+      // Third try: lookup via bankingPaymentId (in case mobile app passes wrong ID)
+      if (!paymentIntent) {
+        paymentIntent = await this.prisma.paymentIntent.findFirst({
+          where: { bankingPaymentId: paymentId, userId },
+          include: {
+            tags: {
+              include: {
+                category: true,
+              },
+            },
+          },
+        });
+      }
+
+      if (!paymentIntent) {
+        throw new NotFoundException('Payment not found');
+      }
+
+      // Check if payment is completed
+      if (paymentIntent.status !== PaymentStatus.SUCCESS) {
+        throw new BadRequestException(
+          'Receipt not available for incomplete payments',
+        );
+      }
+
+      // Try to get existing receipt or generate one
+      let receiptData;
+      try {
+        receiptData = await this.paymentReceiptService.getReceiptByPaymentId(
+          paymentIntent.id,
+        );
+      } catch {
+        // If receipt doesn't exist, generate it
+        this.logger.log(`Generating receipt for payment ${paymentIntent.id}`);
+        receiptData = await this.paymentReceiptService.generateReceipt(
+          paymentIntent.id,
+        );
+      }
+
+      // Format the response to match API contract
+      return {
+        payment: {
+          id: paymentIntent.id,
+          trRef: paymentIntent.trRef,
+          amount: Number(paymentIntent.amount),
+          payeeName: paymentIntent.payeeName,
+          vpa: paymentIntent.vpa,
+          status: paymentIntent.status.toLowerCase(),
+          completedAt: paymentIntent.completedAt?.toISOString(),
+          category: receiptData.category,
+          note: paymentIntent.noteLong,
+        },
+        receipt: {
+          receiptNumber: receiptData.receipt.receiptNumber,
+          collectionId: receiptData.receipt.collectionId,
+          collectionAmount: Number(receiptData.receipt.collectionAmount),
+          collectionFee: Number(receiptData.receipt.collectionFee),
+          collectionStatus: receiptData.receipt.collectionStatus.toLowerCase(),
+          collectionReference: receiptData.receipt.collectionReference,
+          collectionCompletedAt:
+            receiptData.receipt.collectionCompletedAt?.toISOString(),
+          payoutId: receiptData.receipt.payoutId,
+          payoutAmount: Number(receiptData.receipt.payoutAmount),
+          payoutFee: Number(receiptData.receipt.payoutFee),
+          payoutStatus: receiptData.receipt.payoutStatus.toLowerCase(),
+          payoutReference: receiptData.receipt.payoutReference,
+          payoutCompletedAt:
+            receiptData.receipt.payoutCompletedAt?.toISOString(),
+          totalAmount: Number(receiptData.receipt.totalAmount),
+          totalFees: Number(receiptData.receipt.totalFees),
+          netAmount: Number(receiptData.receipt.netAmount),
+          issuedAt: receiptData.receipt.issuedAt?.toISOString(),
+          createdAt: receiptData.receipt.createdAt?.toISOString(),
+        },
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to get payment receipt: ${error.message}`,
+        error.stack,
+      );
+      throw error;
     }
-
-    // Get the receipt
-    const receipt = await this.prisma.paymentReceipt.findUnique({
-      where: { paymentIntentId: paymentId },
-    });
-
-    if (!receipt) {
-      throw new NotFoundException('Receipt not found');
-    }
-
-    return receipt;
-    */
   }
 
   private getStatusMessage(status: string): string {

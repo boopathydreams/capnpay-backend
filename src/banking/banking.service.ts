@@ -23,7 +23,12 @@ export interface CreatePaymentRequest {
 export class BankingService {
   private readonly logger = new Logger(BankingService.name);
   private readonly updates$ = new Subject<{
-    type: 'created' | 'collection_update' | 'payout_update' | 'status_update' | 'alert';
+    type:
+      | 'created'
+      | 'collection_update'
+      | 'payout_update'
+      | 'status_update'
+      | 'alert';
     paymentId: string;
     userId: string; // recipient of the event stream
     payload: any;
@@ -32,7 +37,9 @@ export class BankingService {
   constructor(private readonly prisma: PrismaService) {}
 
   getUserUpdates(userId: string) {
-    return this.updates$.asObservable().pipe(filter((evt) => evt.userId === userId));
+    return this.updates$
+      .asObservable()
+      .pipe(filter((evt) => evt.userId === userId));
   }
 
   /**
@@ -224,7 +231,9 @@ export class BankingService {
     await this.updateOverallStatus(paymentId);
 
     // Emit update (we don't know current user; emit to both parties)
-    const p = await this.prisma.bankingPayment.findUnique({ where: { id: paymentId } });
+    const p = await this.prisma.bankingPayment.findUnique({
+      where: { id: paymentId },
+    });
     if (p) {
       this.updates$.next({
         type: 'collection_update',
@@ -287,7 +296,9 @@ export class BankingService {
     // Update overall status based on collection and payout status
     await this.updateOverallStatus(paymentId);
 
-    const p2 = await this.prisma.bankingPayment.findUnique({ where: { id: paymentId } });
+    const p2 = await this.prisma.bankingPayment.findUnique({
+      where: { id: paymentId },
+    });
     if (p2) {
       this.updates$.next({
         type: 'payout_update',
@@ -351,12 +362,192 @@ export class BankingService {
         },
       });
       // Emit overall status change to both participants
-      const pp = await this.prisma.bankingPayment.findUnique({ where: { id: paymentId } });
+      const pp = await this.prisma.bankingPayment.findUnique({
+        where: { id: paymentId },
+      });
       if (pp) {
-        this.updates$.next({ type: 'status_update', paymentId, userId: pp.senderId, payload: { status: newStatus } });
-        this.updates$.next({ type: 'status_update', paymentId, userId: pp.receiverId, payload: { status: newStatus } });
+        this.updates$.next({
+          type: 'status_update',
+          paymentId,
+          userId: pp.senderId,
+          payload: { status: newStatus },
+        });
+        this.updates$.next({
+          type: 'status_update',
+          paymentId,
+          userId: pp.receiverId,
+          payload: { status: newStatus },
+        });
       }
     }
+  }
+
+  /**
+   * Get collection status for a banking payment (for mobile polling)
+   */
+  async getCollectionStatus(paymentId: string) {
+    this.logger.log(`Getting collection status for ${paymentId}`);
+
+    const payment = await this.prisma.bankingPayment.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        collectionStatus: true,
+        collectionId: true,
+        collectionTxnNo: true,
+        collectionRefNo: true,
+        collectionCompletedAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException(`Payment ${paymentId} not found`);
+    }
+
+    return {
+      paymentId,
+      collectionStatus: payment.collectionStatus,
+      collectionId: payment.collectionId,
+      collectionTxnNo: payment.collectionTxnNo,
+      collectionRefNo: payment.collectionRefNo,
+      collectionCompletedAt: payment.collectionCompletedAt,
+      updatedAt: payment.updatedAt,
+    };
+  }
+
+  /**
+   * Get payout status for a banking payment (for mobile polling)
+   */
+  async getPayoutStatus(paymentId: string) {
+    this.logger.log(`Getting payout status for ${paymentId}`);
+
+    const payment = await this.prisma.bankingPayment.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        payoutStatus: true,
+        payoutId: true,
+        payoutTxnNo: true,
+        payoutRefNo: true,
+        payoutCompletedAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException(`Payment ${paymentId} not found`);
+    }
+
+    return {
+      paymentId,
+      payoutStatus: payment.payoutStatus,
+      payoutId: payment.payoutId,
+      payoutTxnNo: payment.payoutTxnNo,
+      payoutRefNo: payment.payoutRefNo,
+      payoutCompletedAt: payment.payoutCompletedAt,
+      updatedAt: payment.updatedAt,
+    };
+  }
+
+  /**
+   * Get complete payment flow status (collection + payout) for webhook-disabled polling
+   */
+  async getCompletePaymentStatus(paymentId: string) {
+    this.logger.log(`Getting complete payment status for ${paymentId}`);
+
+    const payment = await this.prisma.bankingPayment.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        overallStatus: true,
+        collectionStatus: true,
+        payoutStatus: true,
+        collectionId: true,
+        payoutId: true,
+        collectionCompletedAt: true,
+        payoutCompletedAt: true,
+        amount: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException(`Payment ${paymentId} not found`);
+    }
+
+    // Auto-trigger payout if collection is completed and payout is still pending
+    if (
+      payment.collectionStatus === CollectionStatus.COMPLETED &&
+      payment.payoutStatus === PayoutStatus.PENDING
+    ) {
+      this.logger.log(`Auto-triggering payout for payment ${paymentId}...`);
+      // This would typically call the payout service
+      // For now, we'll just update status to PROCESSING
+      await this.prisma.bankingPayment.update({
+        where: { id: paymentId },
+        data: {
+          payoutStatus: PayoutStatus.PROCESSING,
+          updatedAt: new Date(),
+        },
+      });
+
+      // Update the payment object for response
+      payment.payoutStatus = PayoutStatus.PROCESSING;
+    }
+
+    return {
+      paymentId,
+      overallStatus: payment.overallStatus,
+      collectionStatus: payment.collectionStatus,
+      payoutStatus: payment.payoutStatus,
+      collectionId: payment.collectionId,
+      payoutId: payment.payoutId,
+      collectionCompletedAt: payment.collectionCompletedAt,
+      payoutCompletedAt: payment.payoutCompletedAt,
+      amount: payment.amount,
+      updatedAt: payment.updatedAt,
+      stage: this.determinePaymentStage(
+        payment.collectionStatus,
+        payment.payoutStatus,
+      ),
+    };
+  }
+
+  /**
+   * Determine the current stage of payment for mobile UI
+   */
+  private determinePaymentStage(
+    collectionStatus: CollectionStatus,
+    payoutStatus: PayoutStatus,
+  ): string {
+    if (
+      collectionStatus === CollectionStatus.INITIATED ||
+      collectionStatus === CollectionStatus.PROCESSING
+    ) {
+      return 'collecting';
+    }
+
+    if (collectionStatus === CollectionStatus.COMPLETED) {
+      if (payoutStatus === PayoutStatus.PENDING) {
+        return 'collection_success';
+      }
+      if (payoutStatus === PayoutStatus.PROCESSING) {
+        return 'payout_processing';
+      }
+      if (payoutStatus === PayoutStatus.COMPLETED) {
+        return 'completed';
+      }
+      if (payoutStatus === PayoutStatus.FAILED) {
+        return 'payout_failed';
+      }
+    }
+
+    if (collectionStatus === CollectionStatus.FAILED) {
+      return 'collection_failed';
+    }
+
+    return 'unknown';
   }
 
   /**
@@ -428,7 +619,11 @@ export class BankingService {
       if (from || to) {
         const gte = from ? new Date(from) : undefined;
         const lte = to ? new Date(to) : undefined;
-        if (gte || lte) createdAtFilter = { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) };
+        if (gte || lte)
+          createdAtFilter = {
+            ...(gte ? { gte } : {}),
+            ...(lte ? { lte } : {}),
+          };
       }
     } catch {}
 
@@ -517,15 +712,27 @@ export class BankingService {
   }
 
   async setPaymentCategory(paymentId: string, categoryId: string) {
-    const payment = await this.prisma.bankingPayment.findUnique({ where: { id: paymentId } });
+    const payment = await this.prisma.bankingPayment.findUnique({
+      where: { id: paymentId },
+    });
     if (!payment) throw new NotFoundException(`Payment ${paymentId} not found`);
     const updated = await this.prisma.bankingPayment.update({
       where: { id: paymentId },
       data: { categoryId, updatedAt: new Date() },
     });
     // Emit status update for UI to refresh
-    this.updates$.next({ type: 'status_update', paymentId, userId: updated.senderId, payload: { categoryId } });
-    this.updates$.next({ type: 'status_update', paymentId, userId: updated.receiverId, payload: { categoryId } });
+    this.updates$.next({
+      type: 'status_update',
+      paymentId,
+      userId: updated.senderId,
+      payload: { categoryId },
+    });
+    this.updates$.next({
+      type: 'status_update',
+      paymentId,
+      userId: updated.receiverId,
+      payload: { categoryId },
+    });
     return { ok: true };
   }
 }
