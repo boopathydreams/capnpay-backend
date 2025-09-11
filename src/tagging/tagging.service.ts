@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CategoriesService } from '../categories/categories.service';
+import { EnhancedTaggingService } from '../ai/services/enhanced-tagging.service';
 
 export interface TagSuggestion {
   categoryId: string;
@@ -44,16 +46,39 @@ export interface TaggingContext {
 
 @Injectable()
 export class TaggingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly categoriesService: CategoriesService,
+    private readonly enhancedTaggingService: EnhancedTaggingService,
+  ) {}
 
   /**
    * Generate AI-suggested tag based on payment context
    */
   async suggestTag(context: TaggingContext): Promise<TagSuggestion> {
+    // Phase 2: First check VpaRegistry for canonical category mapping
+    const vpaRegistrySuggestion = await this.getVpaRegistrySuggestion(context);
+    if (vpaRegistrySuggestion) {
+      return vpaRegistrySuggestion;
+    }
+
     // Try to get suggestion from user's payment history
     const historicalSuggestion = await this.getHistoricalSuggestion(context);
     if (historicalSuggestion) {
       return historicalSuggestion;
+    }
+
+    // Phase 2-3: ML prediction using EnhancedTaggingService
+    try {
+      const mlSuggestion = await this.getMLSuggestion(context);
+      if (mlSuggestion) {
+        return mlSuggestion;
+      }
+    } catch (error) {
+      console.error(
+        '❌ ML suggestion failed, falling back to patterns:',
+        error.message,
+      );
     }
 
     // Fallback to payee name pattern matching
@@ -107,6 +132,81 @@ export class TaggingService {
     }
 
     return null;
+  }
+
+  /**
+   * Get ML-powered suggestion using EnhancedTaggingService
+   */
+  private async getMLSuggestion(
+    context: TaggingContext,
+  ): Promise<TagSuggestion | null> {
+    try {
+      // Build enhanced context for ML service
+      const enhancedContext = await this.buildEnhancedContext(context);
+
+      // Get ML prediction
+      const mlPrediction =
+        await this.enhancedTaggingService.predictCategory(enhancedContext);
+
+      if (mlPrediction && mlPrediction.confidence > 0.6) {
+        // Convert ML prediction to TagSuggestion format
+        const category = await this.prisma.category.findUnique({
+          where: { id: mlPrediction.categoryId },
+        });
+
+        if (category) {
+          return {
+            categoryId: mlPrediction.categoryId,
+            tagText: mlPrediction.categoryName,
+            confidence: mlPrediction.confidence,
+            category: {
+              id: category.id,
+              name: category.name,
+              color: category.color,
+            },
+          };
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error('❌ ML prediction error:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Build enhanced context for ML service
+   */
+  private async buildEnhancedContext(context: TaggingContext): Promise<any> {
+    // For now, use basic context transformation
+    // This can be enhanced later with user spending profiles, etc.
+    return {
+      userId: context.userId,
+      amount: context.amount,
+      vpa: context.vpa,
+      payeeName: context.payeeName,
+      timeOfDay: context.timeOfDay,
+      dayOfWeek: context.dayOfWeek,
+      userSpendingProfile: {
+        avgTransactionAmount: context.amount,
+        categoryRatios: {},
+        timePreferences: {},
+        frequencyPattern: 1,
+      },
+      merchantIntelligence: {
+        isKnownMerchant: false,
+        confidence: 0.5,
+        similarMerchants: [],
+      },
+      networkEffects: {
+        communityTagging: {},
+        similarUserPatterns: [],
+        trendingCategories: [],
+        payeeSeenBefore: false,
+        communityTopCategory: '',
+      },
+    };
   }
 
   /**
@@ -490,5 +590,258 @@ export class TaggingService {
     }
 
     return nudges;
+  }
+
+  /**
+   * Phase 2: Check VpaRegistry for canonical category mapping
+   * If user has no history, use VPA's canonical category
+   */
+  private async getVpaRegistrySuggestion(
+    context: TaggingContext,
+  ): Promise<TagSuggestion | null> {
+    // Check if user has any payment history first
+    const userPaymentCount = await this.prisma.paymentIntent.count({
+      where: {
+        userId: context.userId,
+        status: 'SUCCESS',
+      },
+    });
+
+    // Only use VPA registry suggestion if user has no/limited history
+    if (userPaymentCount > 5) {
+      return null;
+    }
+
+    // Look up VPA in registry
+    const vpaEntry = await this.prisma.vpaRegistry.findUnique({
+      where: { vpaAddress: context.vpa },
+    });
+
+    if (!vpaEntry?.categoryCatalogId) {
+      return null;
+    }
+
+    // Get or create user category mapped to the canonical category
+    const userCategory =
+      await this.categoriesService.resolveCanonicalToUserCategory(
+        context.userId,
+        vpaEntry.categoryCatalogId,
+      );
+
+    return {
+      categoryId: userCategory.id,
+      tagText: `${userCategory.name} payment`,
+      confidence: 0.8, // High confidence for VPA registry match
+      category: {
+        id: userCategory.id,
+        name: userCategory.name,
+        color: userCategory.color,
+      },
+    };
+  }
+
+  /**
+   * Phase 3: Update VPA registry with confirmed category based on successful payment tagging
+   * On confirmed tags, update VPA registry link and optional vote/confidence
+   */
+  async updateVpaRegistryWithConfirmedTag(
+    vpaAddress: string,
+    categoryId: string,
+    confidence: number = 0.8,
+    source: 'AUTO' | 'MANUAL' = 'AUTO',
+    userId?: string,
+  ): Promise<void> {
+    try {
+      // Get the canonical category for this user category
+      const userCategory = await this.prisma.category.findUnique({
+        where: { id: categoryId },
+        include: { canonicalCategory: true },
+      });
+
+      if (!userCategory?.canonicalCategory) {
+        console.log(
+          `⚠️ No canonical category found for user category ${categoryId}`,
+        );
+        return;
+      }
+
+      const canonicalCategoryId = userCategory.canonicalCategory.id;
+
+      // Find existing VPA registry entry
+      const existingEntry = await this.prisma.vpaRegistry.findUnique({
+        where: { vpaAddress },
+        include: { categoryCatalog: true },
+      });
+
+      if (existingEntry) {
+        // If entry exists and has same canonical category, increment confidence
+        if (existingEntry.categoryCatalogId === canonicalCategoryId) {
+          const newConfidence = Math.min(
+            (existingEntry.categoryConfidence || 0.5) + 0.1,
+            1.0,
+          );
+
+          await this.prisma.vpaRegistry.update({
+            where: { vpaAddress },
+            data: {
+              categoryConfidence: newConfidence,
+              votes: (existingEntry.votes || 0) + 1,
+              lastUpdated: new Date(),
+            },
+          });
+
+          console.log(
+            `✅ Updated VPA ${vpaAddress} confidence to ${newConfidence} (${existingEntry.votes + 1} votes)`,
+          );
+        } else {
+          // Different category suggestion - create community label for voting
+          await this.createCommunityLabel(
+            vpaAddress,
+            canonicalCategoryId,
+            confidence,
+            source,
+          );
+        }
+      } else {
+        // Create new VPA registry entry with confirmed category
+        // Use provided userId or find first user as fallback
+        let targetUserId = userId;
+        if (!targetUserId) {
+          const firstUser = await this.prisma.user.findFirst();
+          if (!firstUser) {
+            console.error(
+              '❌ No users found - cannot create VPA registry entry',
+            );
+            return;
+          }
+          targetUserId = firstUser.id;
+        }
+
+        await this.prisma.vpaRegistry.create({
+          data: {
+            vpaAddress,
+            userId: targetUserId,
+            categoryCatalogId: canonicalCategoryId,
+            categoryConfidence: confidence,
+            votes: 1,
+            lastUpdated: new Date(),
+          },
+        });
+
+        console.log(
+          `✅ Created VPA registry entry for ${vpaAddress} with canonical category ${canonicalCategoryId}`,
+        );
+      }
+    } catch (error) {
+      console.error(
+        '❌ Failed to update VPA registry with confirmed tag:',
+        error,
+      );
+      // Don't throw - this is auxiliary functionality
+    }
+  }
+
+  /**
+   * Create community label for alternative category suggestions
+   * Enables community voting on VPA categorizations
+   */
+  private async createCommunityLabel(
+    vpaAddress: string,
+    canonicalCategoryId: string,
+    confidence: number,
+    source: 'AUTO' | 'MANUAL',
+  ): Promise<void> {
+    try {
+      // Check if this label already exists
+      const existingLabel = await this.prisma.communityLabel.findFirst({
+        where: {
+          vpaAddress,
+          categoryCatalogId: canonicalCategoryId,
+        },
+      });
+
+      if (existingLabel) {
+        // Increment existing label confidence and votes
+        await this.prisma.communityLabel.update({
+          where: { id: existingLabel.id },
+          data: {
+            confidence: Math.min((existingLabel.confidence || 0.5) + 0.1, 1.0),
+            votes: (existingLabel.votes || 0) + 1,
+            lastUpdated: new Date(),
+          },
+        });
+      } else {
+        // Create new community label
+        await this.prisma.communityLabel.create({
+          data: {
+            key: `${vpaAddress}:${canonicalCategoryId}`, // Generate unique key
+            vpaAddress,
+            categoryCatalogId: canonicalCategoryId,
+            confidence,
+            votes: 1,
+            source,
+            lastUpdated: new Date(),
+          },
+        });
+      }
+
+      console.log(
+        `✅ Updated community label for ${vpaAddress} - canonical category ${canonicalCategoryId}`,
+      );
+    } catch (error) {
+      console.error('❌ Failed to create community label:', error);
+    }
+  }
+
+  /**
+   * Get community consensus for VPA categorization
+   * Returns the most voted canonical category for a VPA
+   */
+  async getVpaCommunityConsensus(vpaAddress: string): Promise<{
+    canonicalCategoryId: string;
+    confidence: number;
+    votes: number;
+    source: string;
+  } | null> {
+    try {
+      // Get VPA registry entry (official)
+      const vpaEntry = await this.prisma.vpaRegistry.findUnique({
+        where: { vpaAddress },
+        include: { categoryCatalog: true },
+      });
+
+      // Get community labels (alternative suggestions)
+      const communityLabels = await this.prisma.communityLabel.findMany({
+        where: { vpaAddress },
+        include: { categoryCatalog: true },
+        orderBy: [{ votes: 'desc' }, { confidence: 'desc' }],
+      });
+
+      // Determine consensus
+      if (
+        vpaEntry &&
+        (!communityLabels.length || vpaEntry.votes >= communityLabels[0].votes)
+      ) {
+        return {
+          canonicalCategoryId: vpaEntry.categoryCatalogId,
+          confidence: vpaEntry.categoryConfidence || 0.5,
+          votes: vpaEntry.votes || 1,
+          source: 'registry',
+        };
+      } else if (communityLabels.length > 0) {
+        const topLabel = communityLabels[0];
+        return {
+          canonicalCategoryId: topLabel.categoryCatalogId,
+          confidence: topLabel.confidence || 0.5,
+          votes: topLabel.votes || 1,
+          source: 'community',
+        };
+      }
+
+      return null;
+    } catch (error) {
+      console.error('❌ Failed to get VPA community consensus:', error);
+      return null;
+    }
   }
 }

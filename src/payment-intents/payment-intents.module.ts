@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { HttpModule } from '@nestjs/axios';
 import { PaymentIntentsController } from './payment-intents.controller';
 import { PaymentIntentsService } from './payment-intents.service';
 import { PaymentReceiptService } from './payment-receipt.service';
@@ -10,9 +11,17 @@ import { TaggingService } from '../tagging/tagging.service';
 import { CapsService } from '../caps/caps.service';
 import { DecentroModule } from '../decentro/decentro.module';
 import { BankingModule } from '../banking/banking.module';
+import { CategoriesModule } from '../categories/categories.module';
+import { AIModule } from '../ai/ai.module';
 
 @Module({
-  imports: [DecentroModule, BankingModule],
+  imports: [
+    DecentroModule,
+    BankingModule,
+    CategoriesModule,
+    AIModule,
+    HttpModule,
+  ],
   controllers: [PaymentIntentsController, PaymentReceiptController],
   providers: [
     PaymentIntentsService,

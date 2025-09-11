@@ -17,6 +17,7 @@ import { ContactsModule } from './contacts/contacts.module';
 import { MemosModule } from './memos/memos.module';
 import { ReconciliationModule } from './reconciliation/reconciliation.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { AIModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -59,6 +60,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     MemosModule,
     ReconciliationModule,
     NotificationsModule,
+    AIModule,
   ],
   controllers: [AppController],
   providers: [AppService],

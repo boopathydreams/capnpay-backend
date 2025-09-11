@@ -17,6 +17,9 @@ import {
   CompletePaymentIntentResponseDto,
 } from './dto/payment-intent-response.dto';
 import { PaymentStatus } from '@prisma/client';
+import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
+import { lastValueFrom } from 'rxjs';
 
 @Injectable()
 export class PaymentIntentsService {
@@ -30,6 +33,8 @@ export class PaymentIntentsService {
     private readonly decentroService: DecentroService,
     private readonly paymentReceiptService: PaymentReceiptService,
     private readonly bankingService: BankingService,
+    private readonly httpService: HttpService,
+    private readonly configService: ConfigService,
   ) {}
 
   /**
@@ -222,18 +227,18 @@ export class PaymentIntentsService {
       };
 
       // Get AI tagging suggestion for this payment
-      const tagSuggestion = await this.taggingService.suggestTag(context);
+      // Check if the payment is already tagged FIRST
+      const existingTag = await this.prisma.tag.findFirst({
+        where: {
+          paymentIntentId: paymentIntent.id,
+        },
+      });
 
-      if (tagSuggestion && tagSuggestion.categoryId) {
-        // Check if the payment is already tagged
-        const existingTag = await this.prisma.tag.findFirst({
-          where: {
-            paymentIntentId: paymentIntent.id,
-          },
-        });
+      // Only call AI tagging if no existing tag
+      if (!existingTag) {
+        const tagSuggestion = await this.taggingService.suggestTag(context);
 
-        // Only auto-tag if not already tagged
-        if (!existingTag) {
+        if (tagSuggestion && tagSuggestion.categoryId) {
           await this.prisma.tag.create({
             data: {
               paymentIntentId: paymentIntent.id,
@@ -243,9 +248,32 @@ export class PaymentIntentsService {
             },
           });
 
-          console.log(
-            `Auto-tagged payment ${paymentIntent.trRef} with category ${tagSuggestion.category?.name}`,
+          // Stream training sample to ML for delta training
+          await this.streamTrainingSample(
+            paymentIntent,
+            tagSuggestion.categoryId,
+            'AUTO',
           );
+
+          // Phase 3: Update VPA registry with confirmed tag and vote/confidence tracking
+          try {
+            await this.taggingService.updateVpaRegistryWithConfirmedTag(
+              paymentIntent.vpa,
+              tagSuggestion.categoryId,
+              tagSuggestion.confidence,
+              'AUTO',
+              paymentIntent.userId, // Pass the actual user ID
+            );
+            console.log(
+              `✅ Phase 3: Updated VPA registry for ${paymentIntent.vpa} with confirmed tag`,
+            );
+          } catch (error) {
+            console.error(
+              '❌ Phase 3: Failed to update VPA registry:',
+              error.message,
+            );
+            // Don't fail the payment flow for VPA registry updates
+          }
         }
       }
     } catch (error) {
@@ -298,6 +326,90 @@ export class PaymentIntentsService {
           source: source === 'auto' ? 'AUTO' : 'MANUAL',
         },
       });
+    }
+
+    // Stream training sample to ML for delta training
+    await this.streamTrainingSample(
+      paymentIntent,
+      categoryId,
+      source === 'auto' ? 'AUTO' : 'MANUAL',
+    );
+
+    // Phase 3: Update VPA registry with confirmed tag
+    try {
+      await this.taggingService.updateVpaRegistryWithConfirmedTag(
+        paymentIntent.vpa,
+        categoryId,
+        source === 'auto' ? 0.8 : 0.95,
+        source === 'auto' ? 'AUTO' : 'MANUAL',
+        paymentIntent.userId,
+      );
+      console.log(
+        `✅ Phase 3: Updated VPA registry for ${paymentIntent.vpa} with ${source} tag`,
+      );
+    } catch (error) {
+      console.error(
+        '❌ Phase 3: Failed to update VPA registry:',
+        error.message,
+      );
+      // Don't fail the tagging operation for VPA registry updates
+    }
+  }
+
+  /**
+   * Stream training sample to ML service for delta training
+   */
+  private async streamTrainingSample(
+    paymentIntent: any,
+    categoryId: string,
+    source: 'AUTO' | 'MANUAL',
+  ): Promise<void> {
+    try {
+      // Get canonical category name for the training sample
+      const category = await this.prisma.category.findUnique({
+        where: { id: categoryId },
+        include: { canonicalCategory: true },
+      });
+
+      if (!category?.canonicalCategory) {
+        console.log(
+          `⚠️ No canonical category found for training sample: ${categoryId}`,
+        );
+        return;
+      }
+
+      const ML_SERVICE_URL = this.configService.get<string>(
+        'ML_SERVICE_URL',
+        'http://localhost:8001',
+      );
+
+      const trainingSample = {
+        user_id: paymentIntent.userId,
+        merchant_name: paymentIntent.payeeName || 'Unknown',
+        amount: Number(paymentIntent.amount),
+        timestamp: new Date().toISOString(),
+        category: category.canonicalCategory.name,
+        vpa: paymentIntent.vpa,
+        source: source,
+      };
+
+      // Stream to ML service
+      await lastValueFrom(
+        this.httpService.post(
+          `${ML_SERVICE_URL}/events/training-sample`,
+          trainingSample,
+        ),
+      );
+
+      console.log(
+        `✅ Training sample sent to ML: ${trainingSample.merchant_name} → ${trainingSample.category} (${source})`,
+      );
+    } catch (error) {
+      // Don't fail the payment flow for training sample streaming
+      console.error(
+        '❌ Failed to stream training sample to ML:',
+        error.message,
+      );
     }
   }
 

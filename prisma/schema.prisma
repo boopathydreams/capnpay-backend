@@ -150,16 +150,84 @@ model Category {
   softBlock         Boolean   @default(false) @map("soft_block")
   nearThresholdPct  Int       @default(80) @map("near_threshold_pct")
   periodStart       DateTime? @map("period_start")
+  canonicalCategoryId String? @map("canonical_category_id")
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
   // Relations
   user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canonicalCategory CategoryCatalog? @relation(fields: [canonicalCategoryId], references: [id])
   tags Tag[]
   spendingCaps SpendingCap[]
 
   @@unique([userId, name])
+  @@index([canonicalCategoryId])
   @@map("categories")
+}
+
+// Global Category Taxonomy
+model CategoryCatalog {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  aliases   Json?    // string[] for alternate names
+  parentName String? @map("parent_name")
+  color     String   @default("#C7ECEE") // Default color
+  defaultCapAmount Decimal? @map("default_cap_amount") @db.Decimal(10, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  categories      Category[]
+  vpaRegistries   VpaRegistry[]
+  merchantCatalog MerchantCatalog[]
+  communityLabels CommunityLabel[]
+
+  @@map("category_catalogs")
+}
+
+// Normalized Merchant Database
+model MerchantCatalog {
+  id               String   @id @default(cuid())
+  name             String
+  normalizedName   String   @unique @map("normalized_name")
+  subcategory      String?
+  aliases          Json?    // string[] for alternate names
+  categoryCatalogId String  @map("category_catalog_id")
+  confidence       Float    @default(0.8) // Confidence in categorization
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  categoryCatalog CategoryCatalog @relation(fields: [categoryCatalogId], references: [id])
+
+  @@index([categoryCatalogId])
+  @@index([normalizedName])
+  @@map("merchant_catalogs")
+}
+
+// Community-Driven Category Labels
+model CommunityLabel {
+  id                String   @id @default(cuid())
+  key               String   @unique // hash of normalized merchant+vpa
+  vpaAddress        String?  @map("vpa_address") // Phase 3: Direct VPA address for community voting
+  categoryCatalogId String   @map("category_catalog_id")
+  confidence        Float    @default(0.5)
+  votes             Int      @default(1)
+  source            String   @default("AUTO") // AUTO | MANUAL - Phase 3: Track vote source
+  lastSeenAt        DateTime @default(now()) @map("last_seen_at")
+  lastUpdated       DateTime? @map("last_updated") // Phase 3: Track when updated
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  categoryCatalog CategoryCatalog @relation(fields: [categoryCatalogId], references: [id])
+
+  @@index([categoryCatalogId])
+  @@index([key])
+  @@index([vpaAddress])
+  @@index([lastSeenAt])
+  @@map("community_labels")
 }
 
 model SpendingCap {
@@ -461,14 +529,21 @@ model VpaRegistry {
   riskLevel             RiskLevel   @default(LOW) @map("risk_level")
   verificationAttempts  Int         @default(0) @map("verification_attempts")
   lastVerifiedAt        DateTime?   @map("last_verified_at")
+  categoryCatalogId     String?     @map("category_catalog_id")
+  categoryConfidence    Float?      @map("category_confidence")
+  votes                 Int         @default(1) // Phase 3: Vote count for category confidence
+  lastLabeledAt         DateTime?   @map("last_labeled_at")
+  lastUpdated           DateTime?   @map("last_updated") // Phase 3: Track when category was last updated
   createdAt             DateTime    @default(now()) @map("created_at")
   updatedAt             DateTime    @updatedAt @map("updated_at")
 
   // Relations
-  user                  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryCatalog       CategoryCatalog? @relation(fields: [categoryCatalogId], references: [id])
 
   @@index([userId])
   @@index([riskLevel])
+  @@index([categoryCatalogId])
   @@map("vpa_registry")
 }
 
