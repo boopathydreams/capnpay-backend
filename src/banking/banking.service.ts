@@ -17,6 +17,7 @@ export interface CreatePaymentRequest {
   purpose?: string;
   paymentType?: PaymentType;
   categoryId?: string;
+  recipientName?: string;
 }
 
 @Injectable()
@@ -52,7 +53,10 @@ export class BankingService {
 
     try {
       // Step 1: Find or create receiver user based on VPA
-      const receiver = await this.findOrCreateUserByVpa(request.receiverVpa);
+      const receiver = await this.findOrCreateUserByVpa(
+        request.receiverVpa,
+        request.recipientName,
+      );
 
       // Step 2: Validate sender exists
       const sender = await this.prisma.user.findUnique({
@@ -124,7 +128,7 @@ export class BankingService {
   /**
    * Find existing user by VPA or create a new VPA-only user
    */
-  private async findOrCreateUserByVpa(vpaAddress: string) {
+  async findOrCreateUserByVpa(vpaAddress: string, recipientName?: string) {
     this.logger.log(`Looking up user for VPA: ${vpaAddress}`);
 
     // First, check VPA registry for existing user
@@ -138,6 +142,20 @@ export class BankingService {
         userId: vpaEntry.user.id,
         userType: vpaEntry.user.userType,
       });
+
+      // Update user name if provided and current name is null/empty
+      if (
+        recipientName &&
+        (!vpaEntry.user.name || vpaEntry.user.name.trim() === '')
+      ) {
+        const updatedUser = await this.prisma.user.update({
+          where: { id: vpaEntry.user.id },
+          data: { name: recipientName },
+        });
+        this.logger.log(`Updated existing user name to: ${recipientName}`);
+        return updatedUser;
+      }
+
       return vpaEntry.user;
     }
 
@@ -151,30 +169,57 @@ export class BankingService {
         userId: existingUser.id,
         userType: existingUser.userType,
       });
+
+      // Update user name if provided and current name is null/empty
+      if (
+        recipientName &&
+        (!existingUser.name || existingUser.name.trim() === '')
+      ) {
+        const updatedUser = await this.prisma.user.update({
+          where: { id: existingUser.id },
+          data: { name: recipientName },
+        });
+        this.logger.log(`Updated existing user name to: ${recipientName}`);
+        return updatedUser;
+      }
+
       return existingUser;
     }
 
     // If no user found, create a new VPA-only user
     this.logger.log(`Creating new VPA-only user for VPA: ${vpaAddress}`);
 
-    // Extract a display name from VPA (e.g., "username@bank" -> "username")
-    const displayName = vpaAddress.split('@')[0] || 'Unknown User';
+    // Use provided name or extract display name from VPA (e.g., "username@bank" -> "username")
+    const displayName =
+      recipientName || vpaAddress.split('@')[0] || 'Unknown User';
+
+    // Format phone number: add +91 if it's a 10-digit number
+    const phoneNumber = `+91${Math.floor(Math.random() * 10000000000)}`;
+
+    // Simple merchant detection: if VPA contains merchant indicators or amount patterns suggest merchant
+    const isMerchant = this.detectMerchantType(vpaAddress, displayName);
+    const userType = isMerchant ? UserType.VPA_ONLY : UserType.VPA_ONLY; // For now, all are VPA_ONLY, but we could add MERCHANT type
 
     const user = await this.prisma.user.create({
       data: {
-        phoneE164: `+91${Math.floor(Math.random() * 10000000000)}`, // Placeholder phone
+        phoneE164: phoneNumber,
         name: displayName,
-        userType: UserType.VPA_ONLY, // Mark as VPA-only user (external user)
+        userType: userType,
         primaryVpa: vpaAddress,
         kycStatus: 'NOT_STARTED',
       },
     });
+
+    // Extract bank name from VPA
+    const bankName = this.extractBankFromVpa(vpaAddress);
 
     // Also create VPA registry entry
     await this.prisma.vpaRegistry.create({
       data: {
         vpaAddress: vpaAddress,
         userId: user.id,
+        extractedPhone: null, // No phone extracted from VPA
+        bankName: bankName,
         isVerified: false,
         isPrimary: true,
       },
@@ -183,8 +228,10 @@ export class BankingService {
     this.logger.log(`Created new VPA-only user:`, {
       userId: user.id,
       vpa: vpaAddress,
-      userType: UserType.VPA_ONLY,
+      userType: userType,
       displayName: displayName,
+      bankName: bankName,
+      isMerchant: isMerchant,
     });
 
     return user;
@@ -734,5 +781,71 @@ export class BankingService {
       payload: { categoryId },
     });
     return { ok: true };
+  }
+
+  /**
+   * Helper method to detect if a VPA belongs to a merchant
+   */
+  private detectMerchantType(vpaAddress: string, displayName: string): boolean {
+    const merchantKeywords = [
+      'merchant',
+      'shop',
+      'store',
+      'business',
+      'company',
+      'ltd',
+      'pvt',
+      'inc',
+      'corp',
+      'retail',
+      'mart',
+      'mall',
+      'restaurant',
+      'cafe',
+      'hotel',
+      'service',
+      'paytm',
+      'phonepe',
+      'gpay',
+      'bhim',
+    ];
+
+    const vpaLower = vpaAddress.toLowerCase();
+    const nameLower = displayName.toLowerCase();
+
+    return merchantKeywords.some(
+      (keyword) => vpaLower.includes(keyword) || nameLower.includes(keyword),
+    );
+  }
+
+  /**
+   * Helper method to extract bank name from VPA
+   */
+  private extractBankFromVpa(vpaAddress: string): string | null {
+    const bankMappings: Record<string, string> = {
+      paytm: 'Paytm Payments Bank',
+      okhdfcbank: 'HDFC Bank',
+      okhdfc: 'HDFC Bank',
+      okaxis: 'Axis Bank',
+      okicici: 'ICICI Bank',
+      oksbi: 'State Bank of India',
+      ybl: 'Yes Bank',
+      idbi: 'IDBI Bank',
+      axl: 'Axis Bank',
+      phonepe: 'Yes Bank',
+      gpay: 'Google Pay',
+      bhim: 'BHIM UPI',
+      apl: 'Airtel Payments Bank',
+      ibl: 'IndusInd Bank',
+      pnb: 'Punjab National Bank',
+      boi: 'Bank of India',
+      cub: 'City Union Bank',
+      federal: 'Federal Bank',
+      kotak: 'Kotak Mahindra Bank',
+      rbl: 'RBL Bank',
+    };
+
+    const handle = vpaAddress.split('@')[1]?.toLowerCase();
+    return handle ? bankMappings[handle] || null : null;
   }
 }

@@ -4,7 +4,16 @@ import { CompleteOnboardingDto } from './dto/onboarding.dto';
 
 @Injectable()
 export class OnboardingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) {}
+
+  /**
+   * Validate UPI ID format
+   */
+  private validateUpiId(upiId: string): boolean {
+    // UPI ID format: identifier@handle
+    const upiRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+$/;
+    return upiRegex.test(upiId) && upiId.length >= 5 && upiId.length <= 255;
+  }
 
   /**
    * Get budget recommendations based on salary
@@ -83,7 +92,27 @@ export class OnboardingService {
     userId: string,
     onboardingDto: CompleteOnboardingDto,
   ) {
-    const { name, salary, totalBudget, categories, caps } = onboardingDto;
+    const { name, upiId, salary, totalBudget, categories, caps } =
+      onboardingDto;
+
+    // Validate UPI ID format
+    if (!this.validateUpiId(upiId)) {
+      throw new BadRequestException('Invalid UPI ID format');
+    }
+
+    // Check if UPI ID is already taken by another user
+    const existingUserWithUpi = await this.prisma.user.findFirst({
+      where: {
+        primaryVpa: upiId,
+        id: { not: userId },
+      },
+    });
+
+    if (existingUserWithUpi) {
+      throw new BadRequestException(
+        'UPI ID is already registered to another user',
+      );
+    }
 
     // Validate total budget allocation
     const totalCategoryBudget = categories.reduce(
@@ -99,14 +128,31 @@ export class OnboardingService {
 
     // Start transaction
     return this.prisma.$transaction(async (tx) => {
-      // Update user with name, salary, and onboarding completion
+      // Update user with name, UPI ID, salary, and onboarding completion
       const user = await tx.user.update({
         where: { id: userId },
         data: {
           name,
+          primaryVpa: upiId,
           monthlySalary: salary,
           isOnboardingComplete: true,
           onboardingCompletedAt: new Date(),
+        },
+      });
+
+      // Add user to VPA registry
+      await tx.vpaRegistry.upsert({
+        where: { vpaAddress: upiId },
+        create: {
+          vpaAddress: upiId,
+          userId: user.id,
+          isVerified: true, // User-provided UPI ID is considered verified
+          isPrimary: true,
+        },
+        update: {
+          userId: user.id,
+          isVerified: true,
+          isPrimary: true,
         },
       });
 

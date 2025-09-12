@@ -81,7 +81,8 @@ enum RiskLevel {
 
 model User {
   id                    String    @id @default(cuid())
-  phoneE164             String    @unique @map("phone_e164")
+  phoneE164             String?   @map("phone_e164") // Made nullable
+  primaryVpa            String?   @unique @map("primary_vpa") // Made unique and required for lookup
   name                  String?
   avatarUrl             String?   @map("avatar_url")
   isOnboardingComplete  Boolean   @default(false) @map("is_onboarding_complete")
@@ -98,7 +99,6 @@ model User {
   userType              UserType    @default(APP_USER) @map("user_type")
   kycStatus             KycStatus   @default(NOT_STARTED) @map("kyc_status")
   userStatus            UserStatus  @default(ACTIVE) @map("user_status")
-  primaryVpa            String?     @map("primary_vpa")
   extractedPhone        String?     @map("extracted_phone")
   riskScore             Decimal?    @default(0.0) @db.Decimal(3, 2) @map("risk_score")
   lastActivityAt        DateTime?   @map("last_activity_at")
@@ -118,6 +118,9 @@ model User {
   sentPayments         BankingPayment[] @relation("PaymentSender")
   receivedPayments     BankingPayment[] @relation("PaymentReceiver")
 
+  @@unique([phoneE164], name: "unique_phone")
+  @@index([primaryVpa])
+  @@index([phoneE164])
   @@map("users")
 }
 

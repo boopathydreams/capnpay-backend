@@ -15,6 +15,7 @@ import { OnboardingModule } from './onboarding/onboarding.module';
 import { UsersModule } from './users/users.module';
 import { ContactsModule } from './contacts/contacts.module';
 import { MemosModule } from './memos/memos.module';
+import { AttachmentsModule } from './attachments/attachments.module';
 import { ReconciliationModule } from './reconciliation/reconciliation.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AIModule } from './ai/ai.module';
@@ -58,6 +59,7 @@ import { AIModule } from './ai/ai.module';
     DecentroModule,
     ContactsModule,
     MemosModule,
+    AttachmentsModule,
     ReconciliationModule,
     NotificationsModule,
     AIModule,

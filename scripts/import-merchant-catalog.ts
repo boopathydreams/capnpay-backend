@@ -170,7 +170,7 @@ async function importMerchantCatalog() {
 
     const csvPath = path.join(
       process.cwd(),
-      '../ml-services/data/merchant_category.csv',
+      'ml-services/data/merchant_category.csv',
     );
 
     if (!fs.existsSync(csvPath)) {

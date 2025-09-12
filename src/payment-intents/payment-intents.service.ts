@@ -20,6 +20,7 @@ import { PaymentStatus } from '@prisma/client';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { lastValueFrom } from 'rxjs';
+import { MemosService } from '../memos/memos.service';
 
 @Injectable()
 export class PaymentIntentsService {
@@ -35,6 +36,7 @@ export class PaymentIntentsService {
     private readonly bankingService: BankingService,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    private readonly memosService: MemosService,
   ) {}
 
   /**
@@ -85,6 +87,26 @@ export class PaymentIntentsService {
       },
     });
 
+    // Create voice memo if provided
+    if (dto.voiceMemo) {
+      try {
+        await this.memosService.createVoiceMemo(
+          paymentIntent.id,
+          dto.voiceMemo.objectKey,
+          dto.voiceMemo.durationMs,
+          dto.voiceMemo.transcript,
+          dto.voiceMemo.transcriptConfidence,
+          dto.voiceMemo.language,
+        );
+        this.logger.log(
+          `Voice memo created for payment intent: ${paymentIntent.id}`,
+        );
+      } catch (error) {
+        this.logger.error('Failed to create voice memo:', error.message);
+        // Don't fail the whole payment for voice memo creation issues
+      }
+    }
+
     // Create corresponding banking payment for compliance
     try {
       const bankingPayment = await this.bankingService.createPayment({
@@ -94,6 +116,7 @@ export class PaymentIntentsService {
         purpose: dto.noteLong || `Payment to ${dto.payeeName}`,
         paymentType: 'ESCROW',
         categoryId: tagSuggestion.categoryId,
+        recipientName: dto.payeeName,
       });
 
       console.log('✅ Banking payment created for compliance:', {
@@ -158,6 +181,7 @@ export class PaymentIntentsService {
 
     return {
       tr: trRef,
+      paymentIntentId: paymentIntent.id,
       upiDeepLink,
       suggestedTag: tagSuggestion,
       categoryId: tagSuggestion.categoryId,
@@ -492,10 +516,7 @@ export class PaymentIntentsService {
     vpa?: string,
     payeeName?: string,
   ) {
-    // Get caps information
-    const capsInfo = await this.capsService.checkCaps(userId, amount);
-
-    // Get AI analysis from tagging service
+    // Get AI analysis from tagging service first to get suggested category
     const analysis = await this.taggingService.analyzePayment(
       userId,
       amount,
@@ -503,17 +524,56 @@ export class PaymentIntentsService {
       payeeName,
     );
 
+    // Get category-specific caps information using the suggested category
+    const suggestedCategoryId =
+      analysis.suggestedTag?.categoryId || analysis.suggestedTag?.category?.id;
+    let capsInfo: any;
+    let capsAnalysis: any;
+
+    if (suggestedCategoryId) {
+      // Get category-specific caps analysis
+      capsAnalysis = await this.capsService.analyzeCaps(
+        userId,
+        suggestedCategoryId,
+        amount,
+      );
+
+      // Get overall caps info for context
+      capsInfo = await this.capsService.checkCaps(userId, amount);
+    } else {
+      // Fallback to overall caps if no category suggested
+      capsInfo = await this.capsService.checkCaps(userId, amount);
+    }
+
     // Get UPI app options
     const upiApps = vpa ? await this.upiService.getUpiApps(vpa) : [];
+
+    // Calculate category-specific remaining amount
+    let remainingAmount = 0;
+    let categorySpending = 0;
+    let categoryLimit = 0;
+    let percentUsed = 0;
+
+    if (capsAnalysis?.affectedCategory) {
+      categorySpending = capsAnalysis.affectedCategory.currentSpent;
+      categoryLimit = capsAnalysis.affectedCategory.capAmount;
+      remainingAmount = Math.max(0, categoryLimit - categorySpending);
+      percentUsed = Math.round((categorySpending / categoryLimit) * 100);
+    } else if (capsInfo) {
+      remainingAmount = capsInfo.totalLimit - capsInfo.totalSpent;
+      percentUsed = Math.round(
+        (capsInfo.totalSpent / capsInfo.totalLimit) * 100,
+      );
+    }
 
     return {
       ...analysis,
       caps: {
-        status: capsInfo.status,
-        percentUsed: Math.round(
-          (capsInfo.totalSpent / capsInfo.totalLimit) * 100,
-        ),
-        remainingAmount: capsInfo.totalLimit - capsInfo.totalSpent,
+        status: capsAnalysis?.capsState || capsInfo?.status || 'ok',
+        percentUsed,
+        remainingAmount,
+        categorySpending,
+        categoryLimit,
         details: capsInfo,
       },
       upiOptions: {
@@ -536,6 +596,13 @@ export class PaymentIntentsService {
       category?: string;
       categoryId?: string;
       note?: string;
+      voiceMemo?: {
+        objectKey: string;
+        durationMs: number;
+        transcript?: string;
+        transcriptConfidence?: number;
+        language?: string;
+      };
     },
   ) {
     // Validate recipient VPA
@@ -606,6 +673,30 @@ export class PaymentIntentsService {
 
       this.logger.log(`✅ PaymentIntent created: ${paymentIntent.id}`);
 
+      // STEP 1.2: Create voice memo if provided
+      if (escrowDto.voiceMemo) {
+        try {
+          this.logger.log('Step 1.2: Creating voice memo...');
+          await this.memosService.createVoiceMemo(
+            paymentIntent.id,
+            escrowDto.voiceMemo.objectKey,
+            escrowDto.voiceMemo.durationMs,
+            escrowDto.voiceMemo.transcript,
+            escrowDto.voiceMemo.transcriptConfidence,
+            escrowDto.voiceMemo.language,
+          );
+          this.logger.log(
+            `✅ Voice memo created for payment intent: ${paymentIntent.id}`,
+          );
+        } catch (voiceMemoError) {
+          this.logger.error(
+            'Failed to create voice memo:',
+            voiceMemoError.message,
+          );
+          // Don't fail the whole payment for voice memo creation issues
+        }
+      }
+
       // STEP 1.5: Create tag for categorization (IMMEDIATE TAGGING)
       this.logger.log('Step 1.5: Creating payment tag...');
       if (finalCategoryId) {
@@ -657,34 +748,26 @@ export class PaymentIntentsService {
         })
         .catch(() => undefined);
 
-      // STEP 3: Ensure recipient user exists
-      this.logger.log('Step 3: Ensuring recipient user exists...');
-      let recipientUser = await this.prisma.vpaRegistry.findUnique({
+      // STEP 3: Ensure recipient user exists using enhanced banking service
+      this.logger.log(
+        'Step 3: Ensuring recipient user exists via banking service...',
+      );
+      const recipientUserCreated =
+        await this.bankingService.findOrCreateUserByVpa(
+          escrowDto.recipientVpa,
+          escrowDto.recipientName,
+        );
+
+      // Get the VPA registry entry for the recipient
+      const recipientUser = await this.prisma.vpaRegistry.findUnique({
         where: { vpaAddress: escrowDto.recipientVpa },
         include: { user: true },
       });
 
       if (!recipientUser) {
-        // Create VPA_ONLY user for recipient
-        const uniquePhone = `+91${Date.now().toString().slice(-10)}`;
-        const newRecipientUser = await this.prisma.user.create({
-          data: {
-            phoneE164: uniquePhone,
-            userType: 'VPA_ONLY',
-            kycStatus: 'NOT_STARTED',
-            userStatus: 'ACTIVE',
-          },
-        });
-
-        recipientUser = await this.prisma.vpaRegistry.create({
-          data: {
-            vpaAddress: escrowDto.recipientVpa,
-            userId: newRecipientUser.id,
-            isPrimary: true,
-            isVerified: false,
-          },
-          include: { user: true },
-        });
+        throw new Error(
+          `Failed to create or find recipient user for VPA: ${escrowDto.recipientVpa}`,
+        );
       }
 
       // Update BankingPayment with correct recipient
@@ -693,7 +776,9 @@ export class PaymentIntentsService {
         data: { receiverId: recipientUser.userId },
       });
 
-      this.logger.log(`✅ Recipient user ensured: ${recipientUser.userId}`);
+      this.logger.log(
+        `✅ Recipient user ensured via banking service: ${recipientUser.userId}, Name: ${recipientUser.user.name}`,
+      );
 
       // STEP 4: Create Collection record
       this.logger.log('Step 4: Creating Collection record...');
@@ -809,7 +894,13 @@ export class PaymentIntentsService {
         expiryTime: new Date(Date.now() + 15 * 60 * 1000),
       };
     } catch (error) {
-      this.logger.error('❌ Complete escrow payment creation failed:', error);
+      this.logger.error('❌ Complete escrow payment creation failed:', {
+        error: error.message,
+        stack: error.stack,
+        code: error.code,
+        meta: error.meta,
+        details: error,
+      });
       throw new BadRequestException(
         `Failed to create escrow payment: ${error.message}`,
       );

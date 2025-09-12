@@ -67,6 +67,18 @@ export class MemosService {
   }
 
   /**
+   * Link a standalone memo to a payment intent
+   */
+  async linkMemoToPayment(memoId: string, paymentIntentId: string) {
+    return await this.prisma.memo.update({
+      where: { id: memoId },
+      data: {
+        paymentIntentId,
+      },
+    });
+  }
+
+  /**
    * Update voice memo with transcript
    */
   async updateVoiceMemoTranscript(

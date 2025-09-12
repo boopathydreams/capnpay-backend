@@ -13,6 +13,7 @@ import { DecentroModule } from '../decentro/decentro.module';
 import { BankingModule } from '../banking/banking.module';
 import { CategoriesModule } from '../categories/categories.module';
 import { AIModule } from '../ai/ai.module';
+import { MemosModule } from '../memos/memos.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { AIModule } from '../ai/ai.module';
     BankingModule,
     CategoriesModule,
     AIModule,
+    MemosModule,
     HttpModule,
   ],
   controllers: [PaymentIntentsController, PaymentReceiptController],

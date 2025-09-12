@@ -138,6 +138,14 @@ export class CompleteOnboardingDto {
   name: string;
 
   @ApiProperty({
+    description: 'User UPI ID (Virtual Payment Address)',
+    example: 'boopathy@paytm',
+  })
+  @IsString()
+  @IsNotEmpty()
+  upiId: string;
+
+  @ApiProperty({
     description: 'Monthly salary in INR',
     example: 50000,
   })

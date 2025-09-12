@@ -148,6 +148,13 @@ export class PaymentIntentsController {
       recipientName?: string;
       category?: string;
       note?: string;
+      voiceMemo?: {
+        objectKey: string;
+        durationMs: number;
+        transcript?: string;
+        transcriptConfidence?: number;
+        language?: string;
+      };
     },
   ) {
     return this.paymentIntentsService.createEscrowPayment(user.id, escrowDto);

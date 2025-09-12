@@ -36,6 +36,12 @@ export class CreatePaymentIntentResponseDto {
   tr: string;
 
   @ApiProperty({
+    description: 'Payment intent ID for internal reference',
+    example: 'cmffcn6810010ittvsuicviat',
+  })
+  paymentIntentId: string;
+
+  @ApiProperty({
     description: 'UPI deep link for payment',
     example:
       'upi://pay?pa=user@paytm&pn=Zomato&am=500&tn=Food&tr=tr_abc123&cu=INR',

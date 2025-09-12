@@ -91,12 +91,46 @@ export class DashboardService {
       0,
     );
 
-    // Calculate safe to spend today
+    // Calculate today's spending separately
+    const startOfToday = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate(),
+    );
+    const endOfToday = new Date(startOfToday);
+    endOfToday.setDate(endOfToday.getDate() + 1);
+
+    const todaysSpending = monthlyPayments
+      .filter((p) => p.createdAt >= startOfToday && p.createdAt < endOfToday)
+      .reduce((sum, p) => sum + Number(p.amount), 0);
+
+    // Calculate safe to spend today: daily budget allocation minus what's already spent today
     const remainingBudget = monthlyLimit - totalSpent;
+    const dailyBudgetAllocation = Math.floor(
+      remainingBudget / Math.max(daysRemaining, 1),
+    );
     const safeToSpendToday = Math.max(
       0,
-      Math.floor(remainingBudget / Math.max(daysRemaining, 1)),
+      dailyBudgetAllocation - todaysSpending,
     );
+
+    // Debug logging for safe to spend calculation
+    console.log('💰 Safe to Spend Today Calculation:', {
+      monthlyLimit,
+      totalSpent,
+      remainingBudget,
+      daysInMonth,
+      daysPassed,
+      daysRemaining,
+      dailyBudgetAllocation,
+      todaysSpending,
+      safeToSpendToday,
+      calculationBreakdown: {
+        step1_remainingBudget: `${monthlyLimit} - ${totalSpent} = ${remainingBudget}`,
+        step2_dailyAllocation: `${remainingBudget} / ${daysRemaining} = ${dailyBudgetAllocation}`,
+        step3_safeToday: `${dailyBudgetAllocation} - ${todaysSpending} = ${safeToSpendToday}`,
+      },
+    });
 
     // Calculate projected month-end spending based on current rate
     const averageDailySpend = totalSpent / daysPassed;

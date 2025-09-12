@@ -12,6 +12,10 @@ export interface TagSuggestion {
     name: string;
     color: string;
   };
+  // Category validation flags from ML service
+  requires_review?: boolean;
+  novel_merchant?: boolean;
+  raw_confidence?: number;
 }
 
 export interface PaymentNudge {
@@ -164,6 +168,10 @@ export class TaggingService {
               name: category.name,
               color: category.color,
             },
+            // Pass through ML validation flags
+            requires_review: mlPrediction.requires_review,
+            novel_merchant: mlPrediction.novel_merchant,
+            raw_confidence: mlPrediction.raw_confidence,
           };
         }
       }

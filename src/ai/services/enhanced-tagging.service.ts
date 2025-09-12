@@ -51,6 +51,10 @@ export interface MLPrediction {
     probability: number;
   }>;
   featureImportance: Record<string, number>;
+  // Category validation flags from ML service
+  requires_review: boolean;
+  novel_merchant: boolean;
+  raw_confidence: number; // Original confidence before any adjustments
 }
 
 @Injectable()
@@ -75,8 +79,8 @@ export class EnhancedTaggingService {
     context: EnhancedTaggingContext,
   ): Promise<MLPrediction> {
     try {
-      // Build comprehensive feature vector
-      const features = await this.extractFeatures(context);
+      // Build comprehensive feature vector (for future enhancements)
+      // const features = await this.extractFeatures(context);
 
       // Call ML service with correct format
       const requestPayload = {
@@ -142,6 +146,10 @@ export class EnhancedTaggingService {
         modelUsed: prediction.model_source || 'unknown',
         alternatives,
         featureImportance: {},
+        // Extract category validation flags from ML response
+        requires_review: prediction.requires_review || false,
+        novel_merchant: prediction.novel_merchant || false,
+        raw_confidence: prediction.confidence,
       };
     } catch (error) {
       this.logger.error(`ML prediction failed: ${error.message}`);
@@ -441,6 +449,10 @@ export class EnhancedTaggingService {
         probability: 0.1,
       })),
       featureImportance: { merchant_lookup: canonicalCategory ? 0.9 : 0.1 },
+      // Fallback predictions always require review due to low confidence
+      requires_review: true,
+      novel_merchant: true, // Fallback suggests unknown merchant
+      raw_confidence: confidence,
     };
   }
 
